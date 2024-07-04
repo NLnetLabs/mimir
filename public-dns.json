@@ -1,0 +1,65 @@
+{
+"upstream":
+    {
+    "cache":
+	{
+	"upstream": 
+	    {
+	    "validated":
+		{
+		"upstream":
+		    {
+		    "redundant":
+			{
+			"transports":
+			    [
+				{
+				"TLS":
+				    {
+				    "servername": "one.one.one.one",
+				    "addr": "1.1.1.1"
+				    }
+				},
+				{
+				"TLS":
+				    {
+				    "servername": "one.one.one.one",
+				    "addr": "2606:4700:4700::1111"
+				    }
+				},
+				{
+				"TLS":
+				    {
+				    "servername": "dns.google",
+				    "addr": "8.8.8.8"
+				    }
+				},
+				{
+				"TLS":
+				    {
+				    "servername": "dns.google",
+				    "addr": "2001:4860:4860::8888"
+				    }
+				},
+				{
+				"TLS":
+				    {
+				    "servername": "dns9.quad9.net",
+				    "addr": "9.9.9.9"
+				    }
+				},
+				{
+				"TLS":
+				    {
+				    "servername": "dns9.quad9.net",
+				    "addr": "2620:fe::9"
+				    }
+				}
+			    ]
+			}
+		    }
+		}
+	    }
+	}
+    }
+}
