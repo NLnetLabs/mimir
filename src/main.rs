@@ -46,6 +46,7 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
@@ -312,6 +313,7 @@ where
         Target::AppendError: Debug,
     {
         Ok(Transaction::single(async move {
+	    let now = Instant::now();
             let msg: Message<RequestOctets> =
                 ctxmsg.message().as_ref().clone();
 
@@ -333,6 +335,7 @@ where
 
             let mut query = conn.send_request(request_msg);
             let reply = query.get_response().await.unwrap();
+	    println!("query_service: response after {:?}", now.elapsed());
             println!("got reply {:?}", reply);
 
             // We get the reply as Message from the client transport but
