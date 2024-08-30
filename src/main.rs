@@ -3,56 +3,47 @@
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
 
-use crate::server::service::Transaction;
 use clap::Parser;
 use domain::base::iana::Rtype;
 use domain::base::message_builder::{AdditionalBuilder, PushError};
-use domain::base::opt::{Opt, OptRecord};
-use domain::base::opt::AllOptData;
+use domain::base::opt::{AllOptData, Opt, OptRecord};
 use domain::base::wire::Composer;
 use domain::base::{Message, MessageBuilder, ParsedName, StreamTarget};
 use domain::dep::octseq::Octets;
-use domain::dep::octseq::OctetsBuilder;
-use domain::net::client::cache;
-use domain::net::client::dgram;
-use domain::net::client::dgram_stream;
-use domain::net::client::multi_stream;
-use domain::net::client::protocol::TlsConnect;
-use domain::net::client::protocol::{TcpConnect, UdpConnect};
-use domain::net::client::redundant;
-use domain::net::client::request::SendRequest;
-use domain::net::client::request::{ComposeRequest, RequestMessage};
-use domain::net::client::validator;
+use domain::net::client::protocol::{TcpConnect, TlsConnect, UdpConnect};
+use domain::net::client::request::{ComposeRequest, RequestMessage, SendRequest};
+use domain::net::client::{cache, dgram, dgram_stream, multi_stream, redundant, validator};
 use domain::net::server;
 use domain::net::server::buf::BufSource;
 use domain::net::server::dgram::DgramServer;
 use domain::net::server::message::Request;
-use domain::net::server::middleware::builder::MiddlewareBuilder;
-use domain::net::server::service::{CallResult, Service, ServiceError};
+use domain::net::server::middleware::cookies::CookiesMiddlewareSvc;
+use domain::net::server::middleware::edns::EdnsMiddlewareSvc;
+use domain::net::server::middleware::mandatory::MandatoryMiddlewareSvc;
+use domain::net::server::service::{CallResult, Service, ServiceError, ServiceResult};
 use domain::net::server::stream::StreamServer;
-use domain::net::server::util::service_fn;
+use domain::rdata::AllRecordData;
 use domain::validator::anchor::TrustAnchors;
 use domain::validator::context::ValidationContext;
-use domain::rdata::AllRecordData;
+use futures::stream::{once, Once};
 use futures_util::{future::BoxFuture, FutureExt};
-use tokio_rustls::rustls::{ClientConfig, RootCertStore};
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::fs::File;
-use std::future::Future;
+use std::future::{ready, Future, Ready};
+use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
-use tokio::net::TcpListener;
-use tokio::net::UdpSocket;
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::task::JoinHandle;
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
 /// Select whether to use service_fn or not.
-const USE_MK_SERVICE: bool = false;
+// const USE_MK_SERVICE: bool = false;
 
 /// Arguments parser.
 #[derive(Parser, Debug)]
@@ -177,10 +168,9 @@ where
     Target: Composer + Debug + Default,
     Target::AppendError: Debug,
 {
-    let mut target = MessageBuilder::from_target(
-        StreamTarget::<Target>::new(Default::default()).unwrap(),
-    )
-    .unwrap();
+    let mut target =
+        MessageBuilder::from_target(StreamTarget::<Target>::new(Default::default()).unwrap())
+            .unwrap();
 
     let header = source.header();
     *target.header_mut() = header;
@@ -222,19 +212,17 @@ where
             let opt_record = OptRecord::from_record(rr);
             target
                 .opt(|newopt| {
-                    newopt
-                        .set_udp_payload_size(opt_record.udp_payload_size());
+                    newopt.set_udp_payload_size(opt_record.udp_payload_size());
                     newopt.set_version(opt_record.version());
                     newopt.set_dnssec_ok(opt_record.dnssec_ok());
 
-                    // Copy the transitive options that we support. 
-		    for option in opt_record.opt().iter::<AllOptData<_, _>>()
-		    {
-			let option = option.unwrap();
-			if let AllOptData::ExtendedError(_) = option {
-			    newopt.push(&option).unwrap();
-			} 
-		    }
+                    // Copy the transitive options that we support.
+                    for option in opt_record.opt().iter::<AllOptData<_, _>>() {
+                        let option = option.unwrap();
+                        if let AllOptData::ExtendedError(_) = option {
+                            newopt.push(&option).unwrap();
+                        }
+                    }
                     Ok(())
                 })
                 .unwrap();
@@ -262,6 +250,67 @@ where
     Ok(builder)
 }
 
+struct MyService<RequestOctets, Conn> {
+    conn: Conn,
+
+    _phantom: PhantomData<RequestOctets>,
+}
+
+impl<RequestOctets, Conn> MyService<RequestOctets, Conn> {
+    fn new(conn: Conn) -> Self {
+        Self {
+            conn,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<RequestOctets, Conn> Service<RequestOctets> for MyService<RequestOctets, Conn>
+where
+    RequestOctets: AsRef<[u8]> + Clone + Debug + Octets + Send + Sync + Unpin + 'static,
+    Conn: Clone + SendRequest<RequestMessage<RequestOctets>> + Send + Sync + 'static,
+{
+    type Target = Vec<u8>;
+    type Stream = Once<Ready<ServiceResult<Self::Target>>>;
+    type Future = Pin<Box<dyn Future<Output = Self::Stream> + Send>>;
+
+    fn call(&self, request: Request<RequestOctets>) -> Self::Future {
+        let conn = self.conn.clone();
+        let fut = async move {
+            let now = Instant::now();
+            let msg: Message<RequestOctets> = request.message().as_ref().clone();
+
+            // The middleware layer will take care of the ID in the reply.
+
+            // We get a Message, but the client transport needs a ComposeRequest
+            // (which is implemented by RequestMessage). Convert.
+
+            let do_bit = dnssec_ok(&msg);
+            // We get a Message, but the client transport needs a
+            // BaseMessageBuilder. Convert.
+            println!("request {:?}", msg);
+            let mut request_msg = RequestMessage::new(msg).unwrap();
+            println!("request {:?}", request_msg);
+            // Set the DO bit if it is set in the request.
+            if do_bit {
+                request_msg.set_dnssec_ok(true);
+            }
+
+            let mut query = conn.send_request(request_msg);
+            let reply = query.get_response().await.unwrap();
+            println!("query_service: response after {:?}", now.elapsed());
+            println!("got reply {:?}", reply);
+
+            // We get the reply as Message from the client transport but
+            // we need to return an AdditionalBuilder with a StreamTarget. Convert.
+            let stream = to_stream_additional::<_, _>(&reply).unwrap();
+            once(ready(Ok(CallResult::new(stream))))
+        };
+        Box::pin(fut)
+    }
+}
+
+/*
 /// Function that returns a Service trait.
 ///
 /// This is a trick to capture the Future by an async block into a type.
@@ -271,11 +320,18 @@ fn query_service<RequestOctets, Target>(
         + Send
         + Sync
         + 'static,
-) -> impl Service<RequestOctets, Target = Target,
-	Future = impl Future<Output = Result<CallResult<Target>, ServiceError>> + Send>
+) -> impl Service<RequestOctets,
+    Target = Target,
+    Stream = Once<Ready<ServiceResult<Self::Target>>>,
+    Future = Pin<
+        Box<
+            dyn Future<Output = Self::Stream, > + Send,
+        >,
+    >
+    >
 where
     RequestOctets:
-        AsRef<[u8]> + Clone + Debug + Octets + Send + Sync + 'static,
+        AsRef<[u8]> + Clone + Debug + Octets + Send + Sync + Unpin + 'static,
     for<'a> &'a RequestOctets: AsRef<[u8]> + Debug,
     Target: AsMut<[u8]>
         + AsRef<[u8]>
@@ -292,16 +348,10 @@ where
     fn query<RequestOctets, Target>(
         ctxmsg: Request<RequestOctets>,
         conn: impl SendRequest<RequestMessage<RequestOctets>> + Send + Sync,
-    ) -> Result<
-        Transaction<
-            Target,
-            impl Future<Output = Result<CallResult<Target>, ServiceError>> + Send,
-        >,
-        ServiceError,
-    >
+    ) -> ServiceResult<Target>
     where
         RequestOctets:
-            AsRef<[u8]> + Clone + Debug + Octets + Send + Sync + 'static,
+            AsRef<[u8]> + Clone + Debug + Octets + Send + Sync + Unpin + 'static,
         for<'a> &'a RequestOctets: AsRef<[u8]> + Debug,
         Target: AsMut<[u8]>
             + AsRef<[u8]>
@@ -309,11 +359,11 @@ where
             + Debug
             + Default
             + OctetsBuilder
-	    + Send,
+        + Send,
         Target::AppendError: Debug,
     {
-        Ok(Transaction::single(async move {
-	    let now = Instant::now();
+        let fut = async move {
+        let now = Instant::now();
             let msg: Message<RequestOctets> =
                 ctxmsg.message().as_ref().clone();
 
@@ -326,7 +376,7 @@ where
             // We get a Message, but the client transport needs a
             // BaseMessageBuilder. Convert.
             println!("request {:?}", msg);
-            let mut request_msg = RequestMessage::new(msg);
+            let mut request_msg = RequestMessage::new(msg).unwrap();
             println!("request {:?}", request_msg);
             // Set the DO bit if it is set in the request.
             if do_bit {
@@ -335,33 +385,30 @@ where
 
             let mut query = conn.send_request(request_msg);
             let reply = query.get_response().await.unwrap();
-	    println!("query_service: response after {:?}", now.elapsed());
+        println!("query_service: response after {:?}", now.elapsed());
             println!("got reply {:?}", reply);
 
             // We get the reply as Message from the client transport but
             // we need to return an AdditionalBuilder with a StreamTarget. Convert.
             let stream = to_stream_additional::<_, _>(&reply).unwrap();
             Ok(CallResult::new(stream))
-        }))
+        };
+    Box::pin(fut)
     }
 
     move |message| query::<RequestOctets, Target>(message, conn.clone())
 }
+*/
 
+/*
 /// Query function for service_fn.
 fn do_query<RequestOctets, Target, Metadata>(
     ctxmsg: Request<RequestOctets>,
     conn: Metadata,
-) -> Result<
-    Transaction<
-        Target,
-        impl Future<Output = Result<CallResult<Target>, ServiceError>> + Send,
-    >,
-    ServiceError,
->
+) -> ServiceResult<Target>
 where
     RequestOctets:
-        AsRef<[u8]> + Clone + Debug + Octets + Send + Sync + 'static,
+        AsRef<[u8]> + Clone + Debug + Octets + Send + Sync + Unpin + 'static,
     Target: AsMut<[u8]>
         + AsRef<[u8]>
         + Composer
@@ -400,6 +447,7 @@ where
         Ok(CallResult::new(stream))
     })))
 }
+*/
 
 /// A buffer based on Vec.
 struct VecBufSource;
@@ -422,10 +470,7 @@ struct VecSingle(Option<CallResult<Vec<u8>>>);
 impl Future for VecSingle {
     type Output = Result<CallResult<Vec<u8>>, ServiceError>;
 
-    fn poll(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         Poll::Ready(Ok(self.0.take().unwrap()))
     }
 }
@@ -444,14 +489,12 @@ async fn main() {
 
     let locport = args.locport.unwrap_or_else(|| "8053".parse().unwrap());
     let buf_source = Arc::new(VecBufSource);
-    let udpsocket2 =
-        UdpSocket::bind(SocketAddr::new("::1".parse().unwrap(), locport))
-            .await
-            .unwrap();
-    let tcplistener =
-        TcpListener::bind(SocketAddr::new("::1".parse().unwrap(), locport))
-            .await
-            .unwrap();
+    let udpsocket2 = UdpSocket::bind(SocketAddr::new("::1".parse().unwrap(), locport))
+        .await
+        .unwrap();
+    let tcplistener = TcpListener::bind(SocketAddr::new("::1".parse().unwrap(), locport))
+        .await
+        .unwrap();
 
     // We cannot use get_transport because we cannot pass a Box<dyn ...> to
     // query_service because it lacks Clone.
@@ -465,23 +508,23 @@ async fn main() {
                     panic!("Nested caches are not possible");
                 }
                 TransportConfig::Validated(validated_conf) => {
-		    // We cannot call get_transport here, because we need
-		    // validator to match the type of upstream.
-		    println!("validated_conf: {validated_conf:?}");
-		    let anchor_file = File::open("root.key").unwrap();
-		    let ta = TrustAnchors::from_reader(anchor_file).unwrap();
-		    match &*validated_conf.upstream {
-			TransportConfig::Redundant(redun_conf) => {
-			    let upstream = get_redun(redun_conf.clone()).await;
-			    let vc = Arc::new(ValidationContext::new(ta, upstream.clone()));
-			    let validated = get_validated(validated_conf.clone(),
-				upstream, vc).await;
-			    let cache = get_cache(cache_conf, validated).await;
-			    start_service(cache, udpsocket2, tcplistener, buf_source)
-			}
-			_ => todo!()
-		    }
-		}
+                    // We cannot call get_transport here, because we need
+                    // validator to match the type of upstream.
+                    println!("validated_conf: {validated_conf:?}");
+                    let anchor_file = File::open("root.key").unwrap();
+                    let ta = TrustAnchors::from_reader(anchor_file).unwrap();
+                    match &*validated_conf.upstream {
+                        TransportConfig::Redundant(redun_conf) => {
+                            let upstream = get_redun(redun_conf.clone()).await;
+                            let vc = Arc::new(ValidationContext::new(ta, upstream.clone()));
+                            let validated =
+                                get_validated(validated_conf.clone(), upstream, vc).await;
+                            let cache = get_cache(cache_conf, validated).await;
+                            start_service(cache, udpsocket2, tcplistener, buf_source)
+                        }
+                        _ => todo!(),
+                    }
+                }
                 TransportConfig::Tcp(tcp_conf) => {
                     let upstream = get_tcp(tcp_conf.clone());
                     let cache = get_cache(cache_conf, upstream).await;
@@ -555,9 +598,7 @@ async fn get_validated<Upstream, VCOcts, VCUpstream>(
 }
 
 /// Get a redundant transport based on its config
-async fn get_redun<
-    CR: ComposeRequest + Clone + Debug + Send + Sync + 'static,
->(
+async fn get_redun<CR: ComposeRequest + Clone + Debug + Send + Sync + 'static>(
     config: RedundantConfig,
 ) -> redundant::Connection<CR> {
     println!("Creating new redundant::Connection");
@@ -601,11 +642,9 @@ fn get_tls<CR: ComposeRequest + Clone + 'static>(
         roots: webpki_roots::TLS_SERVER_ROOTS.into(),
     };
 
-    let client_config = 
-        ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth()
-    ;
+    let client_config = ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
 
     let tls_connect = TlsConnect::new(
         client_config,
@@ -638,8 +677,7 @@ fn get_udptcp<CR: ComposeRequest + Clone + Debug + 'static>(
     let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
     let udp_connect = UdpConnect::new(sockaddr);
     let tcp_connect = TcpConnect::new(sockaddr);
-    let (conn, transport) =
-        dgram_stream::Connection::new(udp_connect, tcp_connect);
+    let (conn, transport) = dgram_stream::Connection::new(udp_connect, tcp_connect);
     tokio::spawn(async move {
         transport.run().await;
         println!("run terminated");
@@ -692,19 +730,27 @@ fn get_transport<CR: ComposeRequest + Clone + 'static>(
                 }
             }
             TransportConfig::Validated(_) => todo!(),
-            TransportConfig::Redundant(redun_conf) => {
-                Box::new(get_redun(redun_conf).await)
-            }
+            TransportConfig::Redundant(redun_conf) => Box::new(get_redun(redun_conf).await),
             TransportConfig::Tcp(tcp_conf) => Box::new(get_tcp(tcp_conf)),
             TransportConfig::Tls(tls_conf) => Box::new(get_tls(tls_conf)),
             TransportConfig::Udp(udp_conf) => Box::new(get_udp(udp_conf)),
-            TransportConfig::UdpTcp(udptcp_conf) => {
-                Box::new(get_udptcp(udptcp_conf))
-            }
+            TransportConfig::UdpTcp(udptcp_conf) => Box::new(get_udptcp(udptcp_conf)),
         };
         a
     }
     .boxed()
+}
+
+fn build_middleware_chain<Svc>(
+    svc: Svc,
+) -> MandatoryMiddlewareSvc<
+    Vec<u8>,
+    EdnsMiddlewareSvc<Vec<u8>, CookiesMiddlewareSvc<Vec<u8>, Svc, ()>, ()>,
+    (),
+> {
+    let svc = CookiesMiddlewareSvc::<Vec<u8>, _, _>::with_random_secret(svc);
+    let svc = EdnsMiddlewareSvc::<Vec<u8>, _, _>::new(svc);
+    MandatoryMiddlewareSvc::<Vec<u8>, _, _>::new(svc)
 }
 
 /// Start a service based on a transport, a UDP server socket and a buffer
@@ -716,56 +762,67 @@ fn start_service(
 ) -> JoinHandle<()>
 where
 {
-    if USE_MK_SERVICE {
-        let svc = service_fn::<VecU8, VecU8, _, _, _>(do_query, conn);
-        let mw = MiddlewareBuilder::default().build();
-        let mut config = server::dgram::Config::new();
-        config.set_middleware_chain(mw);
-        let srv = DgramServer::with_config(
-            socket,
+    /*
+        if USE_MK_SERVICE {
+            let svc = service_fn::<VecU8, VecU8, _, _, _>(do_query, conn);
+            let mw = MiddlewareBuilder::default().build();
+            let mut config = server::dgram::Config::new();
+            config.set_middleware_chain(mw);
+            let srv = DgramServer::with_config(
+                socket,
+                buf_source,
+                Arc::new(svc),
+                config,
+            );
+            let srv = Arc::new(srv);
+            tokio::spawn(async move { srv.run().await })
+
+
+        } else {
+            let svc = query_service::<VecU8, VecU8>(conn);
+        let svc = Arc::new(svc);
+            let mw = MiddlewareBuilder::default().build();
+            let mut config = server::dgram::Config::new();
+            config.set_middleware_chain(mw.clone());
+            let srv = DgramServer::with_config(
+                socket,
+                buf_source.clone(),
+                svc.clone(),
+                config,
+            );
+            let srv = Arc::new(srv);
+            tokio::spawn(async move { srv.run().await });
+
+        let mut conn_config = server::ConnectionConfig::new();
+            conn_config.set_middleware_chain(mw);
+            let mut config = server::stream::Config::new();
+        config.set_connection_config(conn_config);
+        let srv = StreamServer::with_config(listener,
             buf_source,
-            Arc::new(svc),
-            config,
-        );
+            svc,
+            config);
         let srv = Arc::new(srv);
-        tokio::spawn(async move { srv.run().await })
+            tokio::spawn(async move { srv.run().await })
+        }
+    */
+    let svc = MyService::new(conn);
+    let svc = Arc::new(build_middleware_chain(svc));
+    let config = server::dgram::Config::new();
+    let srv = DgramServer::with_config(socket, buf_source.clone(), svc.clone(), config);
+    let srv = Arc::new(srv);
+    tokio::spawn(async move { srv.run().await });
 
-	
-    } else {
-        let svc = query_service::<VecU8, VecU8>(conn);
-	let svc = Arc::new(svc);
-        let mw = MiddlewareBuilder::default().build();
-        let mut config = server::dgram::Config::new();
-        config.set_middleware_chain(mw.clone());
-        let srv = DgramServer::with_config(
-            socket,
-            buf_source.clone(),
-            svc.clone(),
-            config,
-        );
-        let srv = Arc::new(srv);
-        tokio::spawn(async move { srv.run().await });
-
-	let mut conn_config = server::ConnectionConfig::new();
-        conn_config.set_middleware_chain(mw);
-        let mut config = server::stream::Config::new();
-	config.set_connection_config(conn_config);
-	let srv = StreamServer::with_config(listener,
-	    buf_source,
-	    svc,
-	    config);
-	let srv = Arc::new(srv);
-        tokio::spawn(async move { srv.run().await })
-    }
+    let conn_config = server::ConnectionConfig::new();
+    let mut config = server::stream::Config::new();
+    config.set_connection_config(conn_config);
+    let srv = StreamServer::with_config(listener, buf_source, svc, config);
+    let srv = Arc::new(srv);
+    tokio::spawn(async move { srv.run().await })
 }
 
 /// Get a socket address for an IP address, and optional port and a
 /// default port.
-fn get_sockaddr(
-    addr: &str,
-    port: Option<&str>,
-    default_port: u16,
-) -> SocketAddr {
+fn get_sockaddr(addr: &str, port: Option<&str>, default_port: u16) -> SocketAddr {
     let port = match port {
         Some(str) => str.parse().unwrap(),
         None => default_port,
