@@ -8,19 +8,26 @@ use domain::base::iana::Rtype;
 use domain::base::message_builder::{AdditionalBuilder, PushError};
 use domain::base::opt::{AllOptData, Opt, OptRecord};
 use domain::base::wire::Composer;
+use domain::base::Name;
 use domain::base::{Message, MessageBuilder, ParsedName, StreamTarget};
 use domain::dep::octseq::Octets;
 use domain::net::client::protocol::{TcpConnect, TlsConnect, UdpConnect};
 use domain::net::client::request::{ComposeRequest, RequestMessage, SendRequest};
 use domain::net::client::{cache, dgram, dgram_stream, multi_stream, redundant, validator};
 use domain::net::server;
+use domain::net::server::adapter::BoxClientTransportToSrService;
+use domain::net::server::adapter::SingleServiceToService;
 use domain::net::server::buf::BufSource;
 use domain::net::server::dgram::DgramServer;
 use domain::net::server::message::Request;
 use domain::net::server::middleware::cookies::CookiesMiddlewareSvc;
 use domain::net::server::middleware::edns::EdnsMiddlewareSvc;
 use domain::net::server::middleware::mandatory::MandatoryMiddlewareSvc;
+use domain::net::server::qname_router::QnameRouter;
 use domain::net::server::service::{CallResult, Service, ServiceError, ServiceResult};
+use domain::net::server::single_service::ComposeReply;
+use domain::net::server::single_service::ReplyMessage;
+use domain::net::server::single_service::SingleService;
 use domain::net::server::stream::StreamServer;
 use domain::rdata::AllRecordData;
 use domain::validator::anchor::TrustAnchors;
@@ -61,7 +68,43 @@ struct Args {
 #[derive(Debug, Deserialize, Serialize)]
 struct Config {
     /// Config for upstream connections
-    upstream: TransportConfig,
+    upstream: TopUpstreamConfig,
+}
+
+/// Configure for upstream config at the top level.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+enum TopUpstreamConfig {
+    /// Qname router
+    #[serde(rename = "qname-router")]
+    Qname(QnameConfig),
+
+    /// Cached upstreams
+    #[serde(rename = "cache")]
+    Cache(CacheConfig),
+
+    /// Validated upstreams
+    #[serde(rename = "validated")]
+    Validated(ValidatedConfig),
+
+    /// Redudant upstreams
+    #[serde(rename = "redundant")]
+    Redundant(RedundantConfig),
+
+    /// TCP upstream
+    #[serde(rename = "TCP")]
+    Tcp(TcpConfig),
+
+    /// TLS upstream
+    #[serde(rename = "TLS")]
+    Tls(TlsConfig),
+
+    /// UDP upstream that does not switch to TCP when the reply is truncated
+    #[serde(rename = "UDP-only")]
+    Udp(UdpConfig),
+
+    /// UDP upstream that switchs to TCP when the reply is truncated
+    #[serde(rename = "UDP")]
+    UdpTcp(UdpTcpConfig),
 }
 
 /// Configure for client transports
@@ -94,6 +137,21 @@ enum TransportConfig {
     /// UDP upstream that switchs to TCP when the reply is truncated
     #[serde(rename = "UDP")]
     UdpTcp(UdpTcpConfig),
+}
+
+/// Config for a Qname router
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QnameConfig {
+    /// List of transports to be used by a Qname router
+    domains: Vec<QnameDomain>,
+}
+
+/// Config for a Qname-routed domain
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QnameDomain {
+    /// Name of the domain
+    name: String,
+    upstream: TransportConfig,
 }
 
 /// Config for a cached transport
@@ -499,7 +557,11 @@ async fn main() {
     // We cannot use get_transport because we cannot pass a Box<dyn ...> to
     // query_service because it lacks Clone.
     let udp_join_handle = match conf.upstream {
-        TransportConfig::Cache(cache_conf) => {
+        TopUpstreamConfig::Qname(qname_conf) => {
+            let qr = get_qname_router::<ReplyMessage>(qname_conf).await;
+            start_single_service(qr, udpsocket2, tcplistener, buf_source)
+        }
+        TopUpstreamConfig::Cache(cache_conf) => {
             // We cannot call get_transport here, because we need cache to
             // match the type of upstream. Would an enum help here?
             println!("cache_conf: {cache_conf:?}");
@@ -552,30 +614,48 @@ async fn main() {
                 }
             }
         }
-        TransportConfig::Validated(_) => todo!(),
-        TransportConfig::Redundant(redun_conf) => {
-            let redun = get_redun::<RequestMessage<VecU8>>(redun_conf).await;
+        TopUpstreamConfig::Validated(_) => todo!(),
+        TopUpstreamConfig::Redundant(redun_conf) => {
+            let redun = get_redun(redun_conf).await;
             start_service(redun, udpsocket2, tcplistener, buf_source)
         }
-        TransportConfig::Tcp(tcp_conf) => {
+        TopUpstreamConfig::Tcp(tcp_conf) => {
             let tcp = get_tcp::<RequestMessage<VecU8>>(tcp_conf);
             start_service(tcp, udpsocket2, tcplistener, buf_source)
         }
-        TransportConfig::Tls(tls_conf) => {
+        TopUpstreamConfig::Tls(tls_conf) => {
             let tls = get_tls::<RequestMessage<VecU8>>(tls_conf);
             start_service(tls, udpsocket2, tcplistener, buf_source)
         }
-        TransportConfig::Udp(udp_conf) => {
+        TopUpstreamConfig::Udp(udp_conf) => {
             let udp = get_udp::<RequestMessage<VecU8>>(udp_conf);
             start_service(udp, udpsocket2, tcplistener, buf_source)
         }
-        TransportConfig::UdpTcp(udptcp_conf) => {
+        TopUpstreamConfig::UdpTcp(udptcp_conf) => {
             let udptcp = get_udptcp::<RequestMessage<VecU8>>(udptcp_conf);
             start_service(udptcp, udpsocket2, tcplistener, buf_source)
         }
     };
 
     udp_join_handle.await.unwrap();
+}
+
+/// Get a qname router based on its config
+async fn get_qname_router<CR>(config: QnameConfig) -> QnameRouter<Vec<u8>, VecU8, CR>
+where
+    CR: ComposeReply + Send + Sync + 'static,
+{
+    println!("Creating new QnameRouter");
+    let mut qr = QnameRouter::new();
+    println!("Adding to QnameRouter");
+    for e in config.domains {
+        println!("Add to QnameRouter");
+        let transp = get_transport(e.upstream).await;
+        let svc = BoxClientTransportToSrService::new(transp);
+        qr.add(Name::<Vec<u8>>::from_str(&e.name).unwrap(), svc);
+        println!("After Add to QnameRouter");
+    }
+    qr
 }
 
 /// Get a cached transport based on its config
@@ -598,9 +678,7 @@ async fn get_validated<Upstream, VCOcts, VCUpstream>(
 }
 
 /// Get a redundant transport based on its config
-async fn get_redun<CR: ComposeRequest + Clone + Debug + Send + Sync + 'static>(
-    config: RedundantConfig,
-) -> redundant::Connection<CR> {
+async fn get_redun(config: RedundantConfig) -> redundant::Connection<RequestMessage<VecU8>> {
     println!("Creating new redundant::Connection");
     let (redun, transport) = redundant::Connection::new();
     tokio::spawn(async move {
@@ -686,22 +764,39 @@ fn get_udptcp<CR: ComposeRequest + Clone + Debug + 'static>(
 }
 
 /// Get a transport based on its config
-fn get_transport<CR: ComposeRequest + Clone + 'static>(
+fn get_transport(
     config: TransportConfig,
-) -> BoxFuture<'static, Box<dyn SendRequest<CR> + Send + Sync>> {
+) -> BoxFuture<'static, Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync>> {
     // We have an indirectly recursive async function. This function calls
     // get_redun which calls this function. The solution is to return a
     // boxed future.
     async move {
         println!("got config {:?}", config);
-        let a: Box<dyn SendRequest<CR> + Send + Sync> = match config {
+        let a: Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> = match config {
             TransportConfig::Cache(cache_conf) => {
                 println!("cache_conf: {cache_conf:?}");
                 match &*cache_conf.upstream {
                     TransportConfig::Cache(_) => {
                         panic!("Nested caches are not possible");
                     }
-                    TransportConfig::Validated(_) => todo!(),
+                    TransportConfig::Validated(validated_conf) => {
+                        // We cannot call get_transport here, because we need
+                        // validator to match the type of upstream.
+                        println!("validated_conf: {validated_conf:?}");
+                        let anchor_file = File::open("root.key").unwrap();
+                        let ta = TrustAnchors::from_reader(anchor_file).unwrap();
+                        match &*validated_conf.upstream {
+                            TransportConfig::Redundant(redun_conf) => {
+                                let upstream = get_redun(redun_conf.clone()).await;
+                                let vc = Arc::new(ValidationContext::new(ta, upstream.clone()));
+                                let validated =
+                                    get_validated(validated_conf.clone(), upstream, vc).await;
+                                let cache = get_cache(cache_conf, validated).await;
+                                Box::new(cache)
+                            }
+                            _ => todo!(),
+                        }
+                    }
                     TransportConfig::Redundant(redun_conf) => {
                         let upstream = get_redun(redun_conf.clone()).await;
                         let cache = get_cache(cache_conf, upstream).await;
@@ -806,6 +901,32 @@ where
         }
     */
     let svc = MyService::new(conn);
+    let svc = Arc::new(build_middleware_chain(svc));
+    let config = server::dgram::Config::new();
+    let srv = DgramServer::with_config(socket, buf_source.clone(), svc.clone(), config);
+    let srv = Arc::new(srv);
+    tokio::spawn(async move { srv.run().await });
+
+    let conn_config = server::ConnectionConfig::new();
+    let mut config = server::stream::Config::new();
+    config.set_connection_config(conn_config);
+    let srv = StreamServer::with_config(listener, buf_source, svc, config);
+    let srv = Arc::new(srv);
+    tokio::spawn(async move { srv.run().await })
+}
+
+/// Start a service based on a SingleService, a UDP server socket and a buffer
+fn start_single_service<CR, SVC>(
+    svc: SVC,
+    socket: UdpSocket,
+    listener: TcpListener,
+    buf_source: Arc<VecBufSource>,
+) -> JoinHandle<()>
+where
+    SVC: SingleService<VecU8, CR> + Send + Sync + 'static,
+    CR: ComposeReply + Send + Sync + 'static,
+{
+    let svc = SingleServiceToService::<VecU8, SVC, CR>::new(svc);
     let svc = Arc::new(build_middleware_chain(svc));
     let config = server::dgram::Config::new();
     let srv = DgramServer::with_config(socket, buf_source.clone(), svc.clone(), config);
