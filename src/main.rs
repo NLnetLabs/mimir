@@ -15,7 +15,7 @@ use domain::net::client::protocol::{TcpConnect, TlsConnect, UdpConnect};
 use domain::net::client::request::{ComposeRequest, RequestMessage, SendRequest};
 use domain::net::client::{cache, dgram, dgram_stream, multi_stream, redundant, validator};
 use domain::net::server;
-use domain::net::server::adapter::BoxClientTransportToSrService;
+use domain::net::server::adapter::BoxClientTransportToSingleService;
 use domain::net::server::adapter::SingleServiceToService;
 use domain::net::server::buf::BufSource;
 use domain::net::server::dgram::DgramServer;
@@ -651,7 +651,7 @@ where
     for e in config.domains {
         println!("Add to QnameRouter");
         let transp = get_transport(e.upstream).await;
-        let svc = BoxClientTransportToSrService::new(transp);
+        let svc = BoxClientTransportToSingleService::new(transp);
         qr.add(Name::<Vec<u8>>::from_str(&e.name).unwrap(), svc);
         println!("After Add to QnameRouter");
     }
