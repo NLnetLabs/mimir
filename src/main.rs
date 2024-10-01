@@ -13,7 +13,7 @@ use domain::base::{Message, MessageBuilder, ParsedName, StreamTarget};
 use domain::dep::octseq::Octets;
 use domain::net::client::protocol::{TcpConnect, TlsConnect, UdpConnect};
 use domain::net::client::request::{ComposeRequest, RequestMessage, SendRequest};
-use domain::net::client::{cache, dgram, dgram_stream, multi_stream, redundant, validator};
+use domain::net::client::{cache, dgram, dgram_stream, load_balancer, multi_stream, redundant, validator};
 use domain::net::server;
 use domain::net::server::adapter::BoxClientTransportToSingleService;
 use domain::net::server::adapter::SingleServiceToService;
@@ -45,8 +45,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
+use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
 /// Select whether to use service_fn or not.
@@ -90,6 +92,10 @@ enum TopUpstreamConfig {
     #[serde(rename = "redundant")]
     Redundant(RedundantConfig),
 
+    /// Load balancer
+    #[serde(rename = "lb")]
+    LoadBalancer(LoadBalancerConfig),
+
     /// TCP upstream
     #[serde(rename = "TCP")]
     Tcp(TcpConfig),
@@ -121,6 +127,10 @@ enum TransportConfig {
     /// Redudant upstreams
     #[serde(rename = "redundant")]
     Redundant(RedundantConfig),
+
+    /// Load balancer
+    #[serde(rename = "lb")]
+    LoadBalancer(LoadBalancerConfig),
 
     /// TCP upstream
     #[serde(rename = "TCP")]
@@ -173,6 +183,24 @@ struct ValidatedConfig {
 struct RedundantConfig {
     /// List of transports to be used by a redundant transport
     transports: Vec<TransportConfig>,
+}
+
+/// Config for a load balancer transport
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct LoadBalancerConfig {
+    /// List of upstream configs.
+    upstreams: Vec<LBUpstreamConfig>,
+}
+
+/// Config for a load balancer upstream
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct LBUpstreamConfig {
+    label: String,
+    /// Maximum allowed burst for upstream.
+    max_burst: Option<u64>,
+    #[serde(rename = "burst-interval")]
+    burst_interval: Option<f64>,
+    upstream: TransportConfig,
 }
 
 /// Config for a TCP transport
@@ -584,6 +612,14 @@ async fn main() {
                             let cache = get_cache(cache_conf, validated).await;
                             start_service(cache, udpsocket2, tcplistener, buf_source)
                         }
+                        TransportConfig::LoadBalancer(lb_conf) => {
+                            let upstream = get_lb(lb_conf.clone()).await;
+                            let vc = Arc::new(ValidationContext::new(ta, upstream.clone()));
+                            let validated =
+                                get_validated(validated_conf.clone(), upstream, vc).await;
+                            let cache = get_cache(cache_conf, validated).await;
+                            start_service(cache, udpsocket2, tcplistener, buf_source)
+                        }
                         _ => todo!(),
                     }
                 }
@@ -602,6 +638,11 @@ async fn main() {
                     let cache = get_cache(cache_conf, upstream).await;
                     start_service(cache, udpsocket2, tcplistener, buf_source)
                 }
+                TransportConfig::LoadBalancer(lb_conf) => {
+                    let upstream = get_lb(lb_conf.clone()).await;
+                    let cache = get_cache(cache_conf, upstream).await;
+                    start_service(cache, udpsocket2, tcplistener, buf_source)
+                }
                 TransportConfig::Udp(udp_conf) => {
                     let upstream = get_udp(udp_conf.clone());
                     let cache = get_cache(cache_conf, upstream).await;
@@ -617,6 +658,10 @@ async fn main() {
         TopUpstreamConfig::Validated(_) => todo!(),
         TopUpstreamConfig::Redundant(redun_conf) => {
             let redun = get_redun(redun_conf).await;
+            start_service(redun, udpsocket2, tcplistener, buf_source)
+        }
+        TopUpstreamConfig::LoadBalancer(lb_conf) => {
+            let redun = get_lb(lb_conf).await;
             start_service(redun, udpsocket2, tcplistener, buf_source)
         }
         TopUpstreamConfig::Tcp(tcp_conf) => {
@@ -691,6 +736,34 @@ async fn get_redun(config: RedundantConfig) -> redundant::Connection<RequestMess
         println!("After Add to redundant::Connection");
     }
     redun
+}
+
+/// Get a load balanced transport based on its config
+async fn get_lb(config: LoadBalancerConfig) -> load_balancer::Connection<RequestMessage<VecU8>> {
+    println!("Creating new load_balancer::Connection");
+    let (lb, transport) = load_balancer::Connection::new();
+    tokio::spawn(async move {
+        transport.run().await;
+    });
+    println!("Adding to load_balancer::Connection");
+    for e in config.upstreams {
+        println!("Add to load_balancer::Connection");
+	let mut conf = load_balancer::ConnConfig::new();
+	conf.set_max_burst(e.max_burst);
+	if let Some(f) = e.burst_interval {
+		conf.set_burst_interval(Duration::from_secs_f64(f));
+	}
+        lb.add(&e.label, conf, get_transport(e.upstream).await).await.unwrap();
+        println!("After Add to load_balancer::Connection");
+    }
+    let lb2 = lb.clone();
+    tokio::spawn(async move {
+	loop {
+	    lb2.print_stats().await;
+	    sleep(Duration::from_secs(60)).await;
+	}
+    });
+    lb
 }
 
 /// Get a TCP transport based on its config
@@ -802,6 +875,11 @@ fn get_transport(
                         let cache = get_cache(cache_conf, upstream).await;
                         Box::new(cache)
                     }
+                    TransportConfig::LoadBalancer(lb_conf) => {
+                        let upstream = get_lb(lb_conf.clone()).await;
+                        let cache = get_cache(cache_conf, upstream).await;
+                        Box::new(cache)
+                    }
                     TransportConfig::Tcp(tcp_conf) => {
                         let upstream = get_tcp(tcp_conf.clone());
                         let cache = get_cache(cache_conf, upstream).await;
@@ -826,6 +904,7 @@ fn get_transport(
             }
             TransportConfig::Validated(_) => todo!(),
             TransportConfig::Redundant(redun_conf) => Box::new(get_redun(redun_conf).await),
+            TransportConfig::LoadBalancer(lb_conf) => Box::new(get_lb(lb_conf).await),
             TransportConfig::Tcp(tcp_conf) => Box::new(get_tcp(tcp_conf)),
             TransportConfig::Tls(tls_conf) => Box::new(get_tls(tls_conf)),
             TransportConfig::Udp(udp_conf) => Box::new(get_udp(udp_conf)),
