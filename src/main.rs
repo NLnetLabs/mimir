@@ -753,7 +753,7 @@ async fn get_lb(config: LoadBalancerConfig) -> load_balancer::Connection<Request
 	if let Some(f) = e.burst_interval {
 		conf.set_burst_interval(Duration::from_secs_f64(f));
 	}
-        lb.add(&e.label, conf, get_transport(e.upstream).await).await.unwrap();
+        lb.add(&e.label, &conf, get_transport(e.upstream).await).await.unwrap();
         println!("After Add to load_balancer::Connection");
     }
     let lb2 = lb.clone();
