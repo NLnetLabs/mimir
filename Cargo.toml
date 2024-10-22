@@ -11,7 +11,7 @@ clap = { version = "=4.3.12", features = ["derive"] }
 clap_lex = "=0.5.0"
 anstyle = "=1.0.1"
 time = "=0.3.23"
-domain = { version = "0.10.1-dev", path = "../domain", features = [ "net", "unstable-client-transport", "unstable-server-transport", "unstable-zonetree", "unstable-validator", "zonefile", "tokio-rustls" ] }
+domain = { version = "0.10.1-dev", path = "../domain", features = [ "net", "unstable-client-transport", "unstable-server-transport", "unstable-zonetree", "unstable-validator", "zonefile", "tokio-rustls", "tokio-stream" ] }
 futures        = { version = "0.3" }
 futures-util = "0"
 octseq         = "0.2"
@@ -22,3 +22,5 @@ serde_yaml = "0.9.25"
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
 tokio-rustls = "0.26"
 webpki-roots = "0.26"
+toml = "0.8.19"
+serde-aux = "4.5.0"
