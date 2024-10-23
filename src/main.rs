@@ -1,7 +1,7 @@
 //! Simple DNS proxy
 
-#![warn(missing_docs)]
-#![warn(clippy::missing_docs_in_private_items)]
+//#![warn(missing_docs)]
+//#![warn(clippy::missing_docs_in_private_items)]
 
 use clap::Parser;
 use domain::base::iana::Rtype;
@@ -13,7 +13,9 @@ use domain::base::{Message, MessageBuilder, ParsedName, StreamTarget};
 use domain::dep::octseq::Octets;
 use domain::net::client::protocol::{TcpConnect, TlsConnect, UdpConnect};
 use domain::net::client::request::{ComposeRequest, RequestMessage, SendRequest};
-use domain::net::client::{cache, dgram, dgram_stream, load_balancer, multi_stream, redundant, validator};
+use domain::net::client::{
+    cache, dgram, dgram_stream, load_balancer, multi_stream, redundant, validator,
+};
 use domain::net::server;
 use domain::net::server::adapter::BoxClientTransportToSingleService;
 use domain::net::server::adapter::SingleServiceToService;
@@ -33,8 +35,8 @@ use domain::rdata::AllRecordData;
 use domain::validator::anchor::TrustAnchors;
 use domain::validator::context::ValidationContext;
 use futures::stream::{once, Once};
-use futures_util::{future::BoxFuture, FutureExt};
 use serde::{Deserialize, Serialize};
+use serde_aux::field_attributes::bool_true;
 use std::fmt::Debug;
 use std::fs::File;
 use std::future::{ready, Future, Ready};
@@ -44,16 +46,12 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Instant;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
-use serde_aux::field_attributes::bool_true;
-
-/// Select whether to use service_fn or not.
-// const USE_MK_SERVICE: bool = false;
 
 /// Arguments parser.
 #[derive(Parser, Debug)]
@@ -89,18 +87,38 @@ enum TopUpstreamConfig {
     #[serde(rename = "qname-router")]
     Qname(QnameConfig),
 
-/*
-    /// Cached upstreams
-    #[serde(rename = "cache")]
-    Cache(CacheConfig),
-*/
+    /// Redudant upstreams
+    #[serde(rename = "redundant")]
+    Redundant(CVRedundantConfig),
 
-/*
-    /// Validator upstreams
-    #[serde(rename = "validator")]
-    Validator(ValidatorConfig),
-*/
+    /// Load balancer
+    #[serde(rename = "lb")]
+    LoadBalancer(CVLoadBalancerConfig),
 
+    /// TCP upstream
+    #[serde(rename = "TCP")]
+    Tcp(TcpConfig),
+
+    /// TLS upstream
+    #[serde(rename = "TLS")]
+    Tls(TlsConfig),
+
+    /// UDP upstream that does not switch to TCP when the reply is truncated
+    #[serde(rename = "UDP-only")]
+    Udp(UdpConfig),
+
+    /// UDP upstream that switchs to TCP when the reply is truncated
+    #[serde(rename = "UDP")]
+    UdpTcp(UdpTcpConfig),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QnameRouterConfig;
+
+/// Configure for client transports
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type")]
+enum FullTransportConfig {
     /// Redudant upstreams
     #[serde(rename = "redundant")]
     Redundant(RedundantConfig),
@@ -126,31 +144,39 @@ enum TopUpstreamConfig {
     UdpTcp(UdpTcpConfig),
 }
 
+/// Configure for client transports
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct QnameRouterConfig;
+#[serde(tag = "type")]
+enum QrTransportConfig {
+    /// Redudant upstreams
+    #[serde(rename = "redundant")]
+    Redundant(CVRedundantConfig),
+
+    /// Load balancer
+    #[serde(rename = "lb")]
+    LoadBalancer(CVLoadBalancerConfig),
+
+    /// TCP upstream
+    #[serde(rename = "TCP")]
+    Tcp(TcpConfig),
+
+    /// TLS upstream
+    #[serde(rename = "TLS")]
+    Tls(TlsConfig),
+
+    /// UDP upstream that does not switch to TCP when the reply is truncated
+    #[serde(rename = "UDP-only")]
+    Udp(UdpConfig),
+
+    /// UDP upstream that switchs to TCP when the reply is truncated
+    #[serde(rename = "UDP")]
+    UdpTcp(UdpTcpConfig),
+}
 
 /// Configure for client transports
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type")]
 enum TransportConfig {
-/*
-    /// Cached upstreams
-    #[serde(rename = "cache")]
-    Cache(CacheConfig),
-
-    /// Validator upstreams
-    #[serde(rename = "validator")]
-    Validator(ValidatorConfig),
-
-    /// Redudant upstreams
-    #[serde(rename = "redundant")]
-    Redundant(RedundantConfig),
-
-    /// Load balancer
-    #[serde(rename = "lb")]
-    LoadBalancer(LoadBalancerConfig),
-*/
-
     /// TCP upstream
     #[serde(rename = "TCP")]
     Tcp(TcpConfig),
@@ -180,7 +206,9 @@ struct QnameConfig {
 struct QnameDomain {
     /// Name of the domain
     name: String,
-    upstream: TransportConfig,
+    cache: Option<CacheConfig>,
+    validator: Option<ValidatorConfig>,
+    upstream: FullTransportConfig,
 }
 
 /// Config for a cached transport
@@ -200,13 +228,35 @@ struct ValidatorConfig {
 /// Config for a redundant transport
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct RedundantConfig {
-    /// List of transports to be used by a redundant transport
-    transports: Vec<TransportConfig>,
+    /// List of upstream configs.
+    upstreams: Vec<RedundantUpstreamConfig>,
+}
+
+/// Config for a redundant transport
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CVRedundantConfig {
+    cache: Option<CacheConfig>,
+    validator: Option<ValidatorConfig>,
+    /// List of upstream configs.
+    upstreams: Vec<RedundantUpstreamConfig>,
+}
+
+/// Config for a redundant upstream
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RedundantUpstreamConfig {
+    upstream: TransportConfig,
 }
 
 /// Config for a load balancer transport
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct LoadBalancerConfig {
+    /// List of upstream configs.
+    upstreams: Vec<LBUpstreamConfig>,
+}
+
+/// Config for a load balancer transport
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CVLoadBalancerConfig {
     cache: Option<CacheConfig>,
     validator: Option<ValidatorConfig>,
     /// List of upstream configs.
@@ -417,145 +467,6 @@ where
     }
 }
 
-/*
-/// Function that returns a Service trait.
-///
-/// This is a trick to capture the Future by an async block into a type.
-fn query_service<RequestOctets, Target>(
-    conn: impl SendRequest<RequestMessage<RequestOctets>>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-) -> impl Service<RequestOctets,
-    Target = Target,
-    Stream = Once<Ready<ServiceResult<Self::Target>>>,
-    Future = Pin<
-        Box<
-            dyn Future<Output = Self::Stream, > + Send,
-        >,
-    >
-    >
-where
-    RequestOctets:
-        AsRef<[u8]> + Clone + Debug + Octets + Send + Sync + Unpin + 'static,
-    for<'a> &'a RequestOctets: AsRef<[u8]> + Debug,
-    Target: AsMut<[u8]>
-        + AsRef<[u8]>
-        + Composer
-        + Debug
-        + Default
-        + OctetsBuilder
-        + Send
-        + Sync
-        + 'static,
-    Target::AppendError: Debug,
-{
-    /// Basic query function for Service.
-    fn query<RequestOctets, Target>(
-        ctxmsg: Request<RequestOctets>,
-        conn: impl SendRequest<RequestMessage<RequestOctets>> + Send + Sync,
-    ) -> ServiceResult<Target>
-    where
-        RequestOctets:
-            AsRef<[u8]> + Clone + Debug + Octets + Send + Sync + Unpin + 'static,
-        for<'a> &'a RequestOctets: AsRef<[u8]> + Debug,
-        Target: AsMut<[u8]>
-            + AsRef<[u8]>
-            + Composer
-            + Debug
-            + Default
-            + OctetsBuilder
-        + Send,
-        Target::AppendError: Debug,
-    {
-        let fut = async move {
-        let now = Instant::now();
-            let msg: Message<RequestOctets> =
-                ctxmsg.message().as_ref().clone();
-
-            // The middleware layer will take care of the ID in the reply.
-
-            // We get a Message, but the client transport needs a ComposeRequest
-            // (which is implemented by RequestMessage). Convert.
-
-            let do_bit = dnssec_ok(&msg);
-            // We get a Message, but the client transport needs a
-            // BaseMessageBuilder. Convert.
-            println!("request {:?}", msg);
-            let mut request_msg = RequestMessage::new(msg).unwrap();
-            println!("request {:?}", request_msg);
-            // Set the DO bit if it is set in the request.
-            if do_bit {
-                request_msg.set_dnssec_ok(true);
-            }
-
-            let mut query = conn.send_request(request_msg);
-            let reply = query.get_response().await.unwrap();
-        println!("query_service: response after {:?}", now.elapsed());
-            println!("got reply {:?}", reply);
-
-            // We get the reply as Message from the client transport but
-            // we need to return an AdditionalBuilder with a StreamTarget. Convert.
-            let stream = to_stream_additional::<_, _>(&reply).unwrap();
-            Ok(CallResult::new(stream))
-        };
-    Box::pin(fut)
-    }
-
-    move |message| query::<RequestOctets, Target>(message, conn.clone())
-}
-*/
-
-/*
-/// Query function for service_fn.
-fn do_query<RequestOctets, Target, Metadata>(
-    ctxmsg: Request<RequestOctets>,
-    conn: Metadata,
-) -> ServiceResult<Target>
-where
-    RequestOctets:
-        AsRef<[u8]> + Clone + Debug + Octets + Send + Sync + Unpin + 'static,
-    Target: AsMut<[u8]>
-        + AsRef<[u8]>
-        + Composer
-        + Debug
-        + Default
-        + OctetsBuilder,
-    Target::AppendError: Debug,
-    Metadata: SendRequest<RequestMessage<RequestOctets>> + Send + 'static,
-{
-    Ok(Transaction::single(Box::pin(async move {
-        let msg: Message<RequestOctets> = ctxmsg.message().as_ref().clone();
-
-        // The middleware layer will take care of the ID in the reply.
-
-        // We get a Message, but the client transport needs a ComposeRequest
-        // (which is implemented by RequestMessage). Convert.
-
-        let do_bit = dnssec_ok(&msg);
-        // We get a Message, but the client transport needs a
-        // BaseMessageBuilder. Convert.
-        println!("request {:?}", msg);
-        let mut request_msg = RequestMessage::new(msg);
-        println!("request {:?}", request_msg);
-        // Set the DO bit if it is set in the request.
-        if do_bit {
-            request_msg.set_dnssec_ok(true);
-        }
-
-        let mut query = conn.send_request(request_msg);
-        let reply = query.get_response().await.unwrap();
-        println!("got reply {:?}", reply);
-
-        // We get the reply as Message from the client transport but
-        // we need to return an AdditionalBuilder with a StreamTarget. Convert.
-        let stream = to_stream_additional::<_, _>(&reply).unwrap();
-        Ok(CallResult::new(stream))
-    })))
-}
-*/
-
 /// A buffer based on Vec.
 struct VecBufSource;
 
@@ -614,84 +525,27 @@ async fn main() {
             let qr = get_qname_router::<ReplyMessage>(qname_conf).await;
             start_single_service(qr, udpsocket2, tcplistener, buf_source)
         }
-/*
-        TopUpstreamConfig::Cache(cache_conf) => {
-            // We cannot call get_transport here, because we need cache to
-            // match the type of upstream. Would an enum help here?
-            println!("cache_conf: {cache_conf:?}");
-            match &*cache_conf.upstream {
-                TransportConfig::Cache(_cache_conf) => {
-                    panic!("Nested caches are not possible");
-                }
-                TransportConfig::Validator(validator_conf) => {
-                    // We cannot call get_transport here, because we need
-                    // validator to match the type of upstream.
-                    println!("validator_conf: {validator_conf:?}");
-                    let anchor_file = File::open("root.key").unwrap();
-                    let ta = TrustAnchors::from_reader(anchor_file).unwrap();
-                    match &*validator_conf.upstream {
-                        TransportConfig::Redundant(redun_conf) => {
-                            let upstream = get_redun(redun_conf.clone()).await;
-                            let vc = Arc::new(ValidationContext::new(ta, upstream.clone()));
-                            let validator =
-                                get_validator(validator_conf.clone(), upstream, vc).await;
-                            let cache = get_cache(cache_conf, validator).await;
-                            start_service(cache, udpsocket2, tcplistener, buf_source)
-                        }
-                        TransportConfig::LoadBalancer(lb_conf) => {
-                            let upstream = get_lb(lb_conf.clone()).await;
-                            let vc = Arc::new(ValidationContext::new(ta, upstream.clone()));
-                            let validator =
-                                get_validator(validator_conf.clone(), upstream, vc).await;
-                            let cache = get_cache(cache_conf, validator).await;
-                            start_service(cache, udpsocket2, tcplistener, buf_source)
-                        }
-                        _ => todo!(),
-                    }
-                }
-                TransportConfig::Tcp(tcp_conf) => {
-                    let upstream = get_tcp(tcp_conf.clone());
-                    let cache = get_cache(cache_conf, upstream).await;
-                    start_service(cache, udpsocket2, tcplistener, buf_source)
-                }
-                TransportConfig::Tls(tls_conf) => {
-                    let upstream = get_tls(tls_conf.clone());
-                    let cache = get_cache(cache_conf, upstream).await;
-                    start_service(cache, udpsocket2, tcplistener, buf_source)
-                }
-                TransportConfig::Redundant(redun_conf) => {
-                    let upstream = get_redun(redun_conf.clone()).await;
-                    let cache = get_cache(cache_conf, upstream).await;
-                    start_service(cache, udpsocket2, tcplistener, buf_source)
-                }
-                TransportConfig::LoadBalancer(lb_conf) => {
-                    let upstream = get_lb(lb_conf.clone()).await;
-                    let cache = get_cache(cache_conf, upstream).await;
-                    start_service(cache, udpsocket2, tcplistener, buf_source)
-                }
-                TransportConfig::Udp(udp_conf) => {
-                    let upstream = get_udp(udp_conf.clone());
-                    let cache = get_cache(cache_conf, upstream).await;
-                    start_service(cache, udpsocket2, tcplistener, buf_source)
-                }
-                TransportConfig::UdpTcp(udptcp_conf) => {
-                    let upstream = get_udptcp(udptcp_conf.clone());
-                    let cache = get_cache(cache_conf, upstream).await;
-                    start_service(cache, udpsocket2, tcplistener, buf_source)
-                }
-            }
-        }
-*/
-/*
-        TopUpstreamConfig::Validator(_) => todo!(),
-*/
         TopUpstreamConfig::Redundant(redun_conf) => {
-            let redun = get_redun(redun_conf).await;
-            start_service(redun, udpsocket2, tcplistener, buf_source)
+            let redun = get_cvredun(&redun_conf).await;
+            start_cache_validator_service(
+                redun_conf.cache,
+                redun_conf.validator,
+                redun,
+                udpsocket2,
+                tcplistener,
+                buf_source,
+            )
         }
         TopUpstreamConfig::LoadBalancer(lb_conf) => {
-            let redun = get_lb(&lb_conf).await;
-            start_cache_validator_service(lb_conf.cache, lb_conf.validator, redun, udpsocket2, tcplistener, buf_source)
+            let redun = get_cvlb(&lb_conf).await;
+            start_cache_validator_service(
+                lb_conf.cache,
+                lb_conf.validator,
+                redun,
+                udpsocket2,
+                tcplistener,
+                buf_source,
+            )
         }
         TopUpstreamConfig::Tcp(tcp_conf) => {
             let tcp = get_tcp::<RequestMessage<VecU8>>(&tcp_conf);
@@ -724,7 +578,7 @@ where
     println!("Adding to QnameRouter");
     for e in config.domains {
         println!("Add to QnameRouter");
-        let transp = get_transport(&e.upstream).await;
+        let transp = get_qr_transport(&e.upstream, &e.cache, &e.validator).await;
         let svc = BoxClientTransportToSingleService::new(transp);
         qr.add(Name::<Vec<u8>>::from_str(&e.name).unwrap(), svc);
         println!("After Add to QnameRouter");
@@ -733,16 +587,32 @@ where
 }
 
 /// Get a redundant transport based on its config
-async fn get_redun(config: RedundantConfig) -> redundant::Connection<RequestMessage<VecU8>> {
+async fn get_redun(config: &RedundantConfig) -> redundant::Connection<RequestMessage<VecU8>> {
     println!("Creating new redundant::Connection");
     let (redun, transport) = redundant::Connection::new();
     tokio::spawn(async move {
         transport.run().await;
     });
     println!("Adding to redundant::Connection");
-    for e in config.transports {
+    for e in &config.upstreams {
         println!("Add to redundant::Connection");
-        redun.add(get_transport(&e).await).await.unwrap();
+        redun.add(get_simple_transport(&e.upstream)).await.unwrap();
+        println!("After Add to redundant::Connection");
+    }
+    redun
+}
+
+/// Get a redundant transport based on its config
+async fn get_cvredun(config: &CVRedundantConfig) -> redundant::Connection<RequestMessage<VecU8>> {
+    println!("Creating new redundant::Connection");
+    let (redun, transport) = redundant::Connection::new();
+    tokio::spawn(async move {
+        transport.run().await;
+    });
+    println!("Adding to redundant::Connection");
+    for e in &config.upstreams {
+        println!("Add to redundant::Connection");
+        redun.add(get_simple_transport(&e.upstream)).await.unwrap();
         println!("After Add to redundant::Connection");
     }
     redun
@@ -758,20 +628,54 @@ async fn get_lb(config: &LoadBalancerConfig) -> load_balancer::Connection<Reques
     println!("Adding to load_balancer::Connection");
     for e in &config.upstreams {
         println!("Add to load_balancer::Connection");
-	let mut conf = load_balancer::ConnConfig::new();
-	conf.set_max_burst(e.max_burst);
-	if let Some(f) = e.burst_interval {
-		conf.set_burst_interval(Duration::from_secs_f64(f));
-	}
-        lb.add(&e.label, &conf, get_transport(&e.upstream).await).await.unwrap();
+        let mut conf = load_balancer::ConnConfig::new();
+        conf.set_max_burst(e.max_burst);
+        if let Some(f) = e.burst_interval {
+            conf.set_burst_interval(Duration::from_secs_f64(f));
+        }
+        lb.add(&e.label, &conf, get_simple_transport(&e.upstream))
+            .await
+            .unwrap();
         println!("After Add to load_balancer::Connection");
     }
     let lb2 = lb.clone();
     tokio::spawn(async move {
-	loop {
-	    lb2.print_stats().await;
-	    sleep(Duration::from_secs(60)).await;
-	}
+        loop {
+            lb2.print_stats().await;
+            sleep(Duration::from_secs(60)).await;
+        }
+    });
+    lb
+}
+
+/// Get a load balanced transport based on its config
+async fn get_cvlb(
+    config: &CVLoadBalancerConfig,
+) -> load_balancer::Connection<RequestMessage<VecU8>> {
+    println!("Creating new load_balancer::Connection");
+    let (lb, transport) = load_balancer::Connection::new();
+    tokio::spawn(async move {
+        transport.run().await;
+    });
+    println!("Adding to load_balancer::Connection");
+    for e in &config.upstreams {
+        println!("Add to load_balancer::Connection");
+        let mut conf = load_balancer::ConnConfig::new();
+        conf.set_max_burst(e.max_burst);
+        if let Some(f) = e.burst_interval {
+            conf.set_burst_interval(Duration::from_secs_f64(f));
+        }
+        lb.add(&e.label, &conf, get_simple_transport(&e.upstream))
+            .await
+            .unwrap();
+        println!("After Add to load_balancer::Connection");
+    }
+    let lb2 = lb.clone();
+    tokio::spawn(async move {
+        loop {
+            lb2.print_stats().await;
+            sleep(Duration::from_secs(60)).await;
+        }
     });
     lb
 }
@@ -847,91 +751,58 @@ fn get_udptcp<CR: ComposeRequest + Clone + Debug + 'static>(
 }
 
 /// Get a transport based on its config
-fn get_transport(
-    config: &TransportConfig,
-) -> BoxFuture<'static, Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync>> {
-    // We have an indirectly recursive async function. This function calls
-    // get_redun which calls this function. The solution is to return a
-    // boxed future.
+async fn get_qr_transport(
+    config: &FullTransportConfig,
+    cache_conf: &Option<CacheConfig>,
+    validator_conf: &Option<ValidatorConfig>,
+) -> Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> {
     let config = config.clone();
-    async move {
-        println!("got config {:?}", config);
-        let a: Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> = match config {
-/*
-            TransportConfig::Cache(cache_conf) => {
-                println!("cache_conf: {cache_conf:?}");
-                match &*cache_conf.upstream {
-/*
-                    TransportConfig::Cache(_) => {
-                        panic!("Nested caches are not possible");
-                    }
-                    TransportConfig::Validator(validator_conf) => {
-                        // We cannot call get_transport here, because we need
-                        // validator to match the type of upstream.
-                        println!("validator_conf: {validator_conf:?}");
-                        let anchor_file = File::open("root.key").unwrap();
-                        let ta = TrustAnchors::from_reader(anchor_file).unwrap();
-                        match &*validator_conf.upstream {
-                            TransportConfig::Redundant(redun_conf) => {
-                                let upstream = get_redun(redun_conf.clone()).await;
-                                let vc = Arc::new(ValidationContext::new(ta, upstream.clone()));
-                                let validator =
-                                    get_validator(validator_conf.clone(), upstream, vc).await;
-                                let cache = get_cache(cache_conf, validator).await;
-                                Box::new(cache)
-                            }
-                            _ => todo!(),
-                        }
-                    }
-*/
-/*
-                    TransportConfig::Redundant(redun_conf) => {
-                        let upstream = get_redun(redun_conf.clone()).await;
-                        let cache = get_cache(cache_conf, upstream).await;
-                        Box::new(cache)
-                    }
-                    TransportConfig::LoadBalancer(lb_conf) => {
-                        let upstream = get_lb(lb_conf.clone()).await;
-                        let cache = get_cache(cache_conf, upstream).await;
-                        Box::new(cache)
-                    }
-*/
-                    TransportConfig::Tcp(tcp_conf) => {
-                        let upstream = get_tcp(tcp_conf.clone());
-                        let cache = get_cache(cache_conf, upstream).await;
-                        Box::new(cache)
-                    }
-                    TransportConfig::Tls(tls_conf) => {
-                        let upstream = get_tls(tls_conf.clone());
-                        let cache = get_cache(cache_conf, upstream).await;
-                        Box::new(cache)
-                    }
-                    TransportConfig::Udp(udp_conf) => {
-                        let upstream = get_udp(udp_conf.clone());
-                        let cache = get_cache(cache_conf, upstream).await;
-                        Box::new(cache)
-                    }
-                    TransportConfig::UdpTcp(udptcp_conf) => {
-                        let upstream = get_udptcp(udptcp_conf.clone());
-                        let cache = get_cache(cache_conf, upstream).await;
-                        Box::new(cache)
-                    }
-                }
-            }
-            TransportConfig::Validator(_) => todo!(),
-            TransportConfig::Redundant(redun_conf) => Box::new(get_redun(redun_conf).await),
-            TransportConfig::LoadBalancer(lb_conf) => Box::new(get_lb(lb_conf).await),
-*/
-            TransportConfig::Tcp(tcp_conf) => Box::new(get_tcp(&tcp_conf)),
-            TransportConfig::Tls(tls_conf) => Box::new(get_tls(&tls_conf)),
-            TransportConfig::Udp(udp_conf) => Box::new(get_udp(&udp_conf)),
-            TransportConfig::UdpTcp(udptcp_conf) => Box::new(get_udptcp(&udptcp_conf)),
-        };
-        a
-    }
-    .boxed()
+    println!("got config {:?}", config);
+    let a: Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> = match config {
+        FullTransportConfig::Redundant(redun_conf) => {
+            let conn = get_redun(&redun_conf).await;
+            box_cache_validator(cache_conf, validator_conf, conn)
+        }
+        FullTransportConfig::LoadBalancer(lb_conf) => {
+            let conn = get_lb(&lb_conf).await;
+            box_cache_validator(cache_conf, validator_conf, conn)
+        }
+        FullTransportConfig::Tcp(tcp_conf) => {
+            let conn = get_tcp(&tcp_conf);
+            box_cache_validator(cache_conf, validator_conf, conn)
+        }
+        FullTransportConfig::Tls(tls_conf) => {
+            let conn = get_tls(&tls_conf);
+            box_cache_validator(cache_conf, validator_conf, conn)
+        }
+        FullTransportConfig::Udp(udp_conf) => {
+            let conn = get_udp(&udp_conf);
+            box_cache_validator(cache_conf, validator_conf, conn)
+        }
+        FullTransportConfig::UdpTcp(udptcp_conf) => {
+            let conn = get_udptcp(&udptcp_conf);
+            box_cache_validator(cache_conf, validator_conf, conn)
+        }
+    };
+    a
 }
 
+/// Get a transport based on its config
+fn get_simple_transport(
+    config: &TransportConfig,
+) -> Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> {
+    let config = config.clone();
+    println!("got config {:?}", config);
+    let a: Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> = match config {
+        TransportConfig::Tcp(tcp_conf) => Box::new(get_tcp(&tcp_conf)),
+        TransportConfig::Tls(tls_conf) => Box::new(get_tls(&tls_conf)),
+        TransportConfig::Udp(udp_conf) => Box::new(get_udp(&udp_conf)),
+        TransportConfig::UdpTcp(udptcp_conf) => Box::new(get_udptcp(&udptcp_conf)),
+    };
+    a
+}
+
+#[allow(clippy::type_complexity)]
 fn build_middleware_chain<Svc>(
     svc: Svc,
 ) -> MandatoryMiddlewareSvc<
@@ -944,6 +815,44 @@ fn build_middleware_chain<Svc>(
     MandatoryMiddlewareSvc::<Vec<u8>, _, _>::new(svc)
 }
 
+fn box_cache_validator(
+    cache_conf: &Option<CacheConfig>,
+    validator_conf: &Option<ValidatorConfig>,
+    conn: impl SendRequest<RequestMessage<VecU8>> + Clone + Send + Sync + 'static,
+) -> Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> {
+    match validator_conf {
+        Some(validator_conf) => {
+            if validator_conf.enabled {
+                let anchor_file = File::open("root.key").unwrap();
+                let ta = TrustAnchors::from_reader(anchor_file).unwrap();
+                let vc = Arc::new(ValidationContext::new(ta, conn.clone()));
+                let conn = validator::Connection::new(conn, vc);
+                box_cache(cache_conf, conn)
+            } else {
+                box_cache(cache_conf, conn)
+            }
+        }
+        None => box_cache(cache_conf, conn),
+    }
+}
+
+fn box_cache(
+    cache_conf: &Option<CacheConfig>,
+    conn: impl SendRequest<RequestMessage<VecU8>> + Clone + Send + Sync + 'static,
+) -> Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> {
+    match cache_conf {
+        Some(cache_conf) => {
+            if cache_conf.enabled {
+                let conn = cache::Connection::new(conn);
+                Box::new(conn)
+            } else {
+                Box::new(conn)
+            }
+        }
+        None => Box::new(conn),
+    }
+}
+
 fn start_cache_validator_service(
     cache_conf: Option<CacheConfig>,
     validator_conf: Option<ValidatorConfig>,
@@ -953,20 +862,18 @@ fn start_cache_validator_service(
     buf_source: Arc<VecBufSource>,
 ) -> JoinHandle<()> {
     match validator_conf {
-	Some(validator_conf) => {
-	    if validator_conf.enabled {
-		let anchor_file = File::open("root.key").unwrap();
-		let ta = TrustAnchors::from_reader(anchor_file).unwrap();
-		let vc = Arc::new(ValidationContext::new(ta, conn.clone()));
-		let conn = validator::Connection::new(conn, vc);
-		start_cache_service(cache_conf, conn, socket, listener, buf_source)
-	    }
-	    else
-	    {
-		start_cache_service(cache_conf, conn, socket, listener, buf_source)
-	    }
-	}
-	None => start_cache_service(cache_conf, conn, socket, listener, buf_source)
+        Some(validator_conf) => {
+            if validator_conf.enabled {
+                let anchor_file = File::open("root.key").unwrap();
+                let ta = TrustAnchors::from_reader(anchor_file).unwrap();
+                let vc = Arc::new(ValidationContext::new(ta, conn.clone()));
+                let conn = validator::Connection::new(conn, vc);
+                start_cache_service(cache_conf, conn, socket, listener, buf_source)
+            } else {
+                start_cache_service(cache_conf, conn, socket, listener, buf_source)
+            }
+        }
+        None => start_cache_service(cache_conf, conn, socket, listener, buf_source),
     }
 }
 
@@ -978,17 +885,15 @@ fn start_cache_service(
     buf_source: Arc<VecBufSource>,
 ) -> JoinHandle<()> {
     match cache_conf {
-	Some(cache_conf) => {
-	    if cache_conf.enabled {
-		let conn = cache::Connection::new(conn);
-		start_service(conn, socket, listener, buf_source)
-	    }
-	    else
-	    {
-		start_service(conn, socket, listener, buf_source)
-	    }
-	}
-	None => start_service(conn, socket, listener, buf_source)
+        Some(cache_conf) => {
+            if cache_conf.enabled {
+                let conn = cache::Connection::new(conn);
+                start_service(conn, socket, listener, buf_source)
+            } else {
+                start_service(conn, socket, listener, buf_source)
+            }
+        }
+        None => start_service(conn, socket, listener, buf_source),
     }
 }
 
@@ -1001,49 +906,6 @@ fn start_service(
 ) -> JoinHandle<()>
 where
 {
-    /*
-        if USE_MK_SERVICE {
-            let svc = service_fn::<VecU8, VecU8, _, _, _>(do_query, conn);
-            let mw = MiddlewareBuilder::default().build();
-            let mut config = server::dgram::Config::new();
-            config.set_middleware_chain(mw);
-            let srv = DgramServer::with_config(
-                socket,
-                buf_source,
-                Arc::new(svc),
-                config,
-            );
-            let srv = Arc::new(srv);
-            tokio::spawn(async move { srv.run().await })
-
-
-        } else {
-            let svc = query_service::<VecU8, VecU8>(conn);
-        let svc = Arc::new(svc);
-            let mw = MiddlewareBuilder::default().build();
-            let mut config = server::dgram::Config::new();
-            config.set_middleware_chain(mw.clone());
-            let srv = DgramServer::with_config(
-                socket,
-                buf_source.clone(),
-                svc.clone(),
-                config,
-            );
-            let srv = Arc::new(srv);
-            tokio::spawn(async move { srv.run().await });
-
-        let mut conn_config = server::ConnectionConfig::new();
-            conn_config.set_middleware_chain(mw);
-            let mut config = server::stream::Config::new();
-        config.set_connection_config(conn_config);
-        let srv = StreamServer::with_config(listener,
-            buf_source,
-            svc,
-            config);
-        let srv = Arc::new(srv);
-            tokio::spawn(async move { srv.run().await })
-        }
-    */
     let svc = MyService::new(conn);
     let svc = Arc::new(build_middleware_chain(svc));
     let config = server::dgram::Config::new();
