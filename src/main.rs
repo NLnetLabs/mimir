@@ -1,16 +1,11 @@
-//! Simple DNS proxy
+//! DNS proxy
 
 //#![warn(missing_docs)]
 //#![warn(clippy::missing_docs_in_private_items)]
 
 use clap::Parser;
-use domain::base::iana::Rtype;
-use domain::base::message_builder::{AdditionalBuilder, PushError};
-use domain::base::opt::{AllOptData, Opt, OptRecord};
 use domain::base::wire::Composer;
 use domain::base::Name;
-use domain::base::{Message, MessageBuilder, ParsedName, StreamTarget};
-use domain::dep::octseq::Octets;
 use domain::net::client::protocol::{TcpConnect, TlsConnect, UdpConnect};
 use domain::net::client::request::{ComposeRequest, RequestMessage, SendRequest};
 use domain::net::client::{
@@ -18,39 +13,36 @@ use domain::net::client::{
 };
 use domain::net::server;
 use domain::net::server::adapter::BoxClientTransportToSingleService;
+use domain::net::server::adapter::ClientTransportToSingleService;
 use domain::net::server::adapter::SingleServiceToService;
 use domain::net::server::buf::BufSource;
 use domain::net::server::dgram::DgramServer;
-use domain::net::server::message::Request;
 use domain::net::server::middleware::cookies::CookiesMiddlewareSvc;
 use domain::net::server::middleware::edns::EdnsMiddlewareSvc;
 use domain::net::server::middleware::mandatory::MandatoryMiddlewareSvc;
 use domain::net::server::qname_router::QnameRouter;
-use domain::net::server::service::{CallResult, Service, ServiceError, ServiceResult};
+use domain::net::server::service::{CallResult, Service, ServiceError};
 use domain::net::server::single_service::ComposeReply;
 use domain::net::server::single_service::ReplyMessage;
 use domain::net::server::single_service::SingleService;
 use domain::net::server::sock::AsyncAccept;
 use domain::net::server::stream::StreamServer;
-use domain::rdata::AllRecordData;
 use domain::validator::anchor::TrustAnchors;
 use domain::validator::context::ValidationContext;
-use futures::stream::{once, Once};
 use serde::{Deserialize, Serialize};
 use serde_aux::field_attributes::bool_true;
 use std::fmt::Debug;
 use std::fs::File;
-use std::future::{ready, Future, Ready};
+use std::future::Future;
 use std::io;
 use std::io::BufReader;
-use std::marker::PhantomData;
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
-use std::time::Instant;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -128,19 +120,19 @@ enum TopUpstreamConfig {
 
     /// TCP upstream
     #[serde(rename = "TCP")]
-    Tcp(TcpConfig),
+    Tcp(CVTcpConfig),
 
     /// TLS upstream
     #[serde(rename = "TLS")]
-    Tls(TlsConfig),
+    Tls(CVTlsConfig),
 
     /// UDP upstream that does not switch to TCP when the reply is truncated
     #[serde(rename = "UDP-only")]
-    Udp(UdpConfig),
+    Udp(CVUdpConfig),
 
     /// UDP upstream that switchs to TCP when the reply is truncated
     #[serde(rename = "UDP")]
-    UdpTcp(UdpTcpConfig),
+    UdpTcp(CVUdpTcpConfig),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -315,9 +307,36 @@ struct TcpConfig {
     port: Option<String>,
 }
 
+/// Config for a TCP transport
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CVTcpConfig {
+    cache: Option<CacheConfig>,
+    validator: Option<ValidatorConfig>,
+    /// Address of the remote resolver
+    addr: String,
+
+    /// Optional port
+    port: Option<String>,
+}
+
 /// Config for a TLS transport
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct TlsConfig {
+    /// Name of the remote resolver
+    servername: String,
+
+    /// Address of the remote resolver
+    addr: String,
+
+    /// Optional port
+    port: Option<String>,
+}
+
+/// Config for a TLS transport
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CVTlsConfig {
+    cache: Option<CacheConfig>,
+    validator: Option<ValidatorConfig>,
     /// Name of the remote resolver
     servername: String,
 
@@ -338,6 +357,18 @@ struct UdpConfig {
     port: Option<String>,
 }
 
+/// Config for a UDP-only transport
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CVUdpConfig {
+    cache: Option<CacheConfig>,
+    validator: Option<ValidatorConfig>,
+    /// Address of the remote resolver
+    addr: String,
+
+    /// Optional port
+    port: Option<String>,
+}
+
 /// Config for a UDP+TCP transport
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct UdpTcpConfig {
@@ -348,154 +379,16 @@ struct UdpTcpConfig {
     port: Option<String>,
 }
 
-/// Convert a Message into an AdditionalBuilder.
-fn to_builder_additional<Octs1: Octets, Target>(
-    source: &Message<Octs1>,
-) -> Result<AdditionalBuilder<StreamTarget<Target>>, PushError>
-where
-    Target: Composer + Debug + Default,
-    Target::AppendError: Debug,
-{
-    let mut target =
-        MessageBuilder::from_target(StreamTarget::<Target>::new(Default::default()).unwrap())
-            .unwrap();
+/// Config for a UDP+TCP transport
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CVUdpTcpConfig {
+    cache: Option<CacheConfig>,
+    validator: Option<ValidatorConfig>,
+    /// Address of the remote resolver
+    addr: String,
 
-    let header = source.header();
-    *target.header_mut() = header;
-
-    let source = source.question();
-    let mut target = target.additional().builder().question();
-    for rr in source {
-        let rr = rr.unwrap();
-        target.push(rr)?;
-    }
-    let mut source = source.answer().unwrap();
-    let mut target = target.answer();
-    for rr in &mut source {
-        let rr = rr.unwrap();
-        let rr = rr
-            .into_record::<AllRecordData<_, ParsedName<_>>>()
-            .unwrap()
-            .unwrap();
-        target.push(rr)?;
-    }
-
-    let mut source = source.next_section().unwrap().unwrap();
-    let mut target = target.authority();
-    for rr in &mut source {
-        let rr = rr.unwrap();
-        let rr = rr
-            .into_record::<AllRecordData<_, ParsedName<_>>>()
-            .unwrap()
-            .unwrap();
-        target.push(rr)?;
-    }
-
-    let source = source.next_section().unwrap().unwrap();
-    let mut target = target.additional();
-    for rr in source {
-        let rr = rr.unwrap();
-        if rr.rtype() == Rtype::OPT {
-            let rr = rr.into_record::<Opt<_>>().unwrap().unwrap();
-            let opt_record = OptRecord::from_record(rr);
-            target
-                .opt(|newopt| {
-                    newopt.set_udp_payload_size(opt_record.udp_payload_size());
-                    newopt.set_version(opt_record.version());
-                    newopt.set_dnssec_ok(opt_record.dnssec_ok());
-
-                    // Copy the transitive options that we support.
-                    for option in opt_record.opt().iter::<AllOptData<_, _>>() {
-                        let option = option.unwrap();
-                        if let AllOptData::ExtendedError(_) = option {
-                            newopt.push(&option).unwrap();
-                        }
-                    }
-                    Ok(())
-                })
-                .unwrap();
-        } else {
-            let rr = rr
-                .into_record::<AllRecordData<_, ParsedName<_>>>()
-                .unwrap()
-                .unwrap();
-            target.push(rr)?;
-        }
-    }
-
-    Ok(target)
-}
-
-/// Convert a Message into an AdditionalBuilder with a StreamTarget.
-fn to_stream_additional<Octs1: Octets, Target>(
-    source: &Message<Octs1>,
-) -> Result<AdditionalBuilder<StreamTarget<Target>>, PushError>
-where
-    Target: Composer + Debug + Default,
-    Target::AppendError: Debug,
-{
-    let builder = to_builder_additional(source).unwrap();
-    Ok(builder)
-}
-
-struct MyService<RequestOctets, Conn> {
-    conn: Conn,
-
-    _phantom: PhantomData<RequestOctets>,
-}
-
-impl<RequestOctets, Conn> MyService<RequestOctets, Conn> {
-    fn new(conn: Conn) -> Self {
-        Self {
-            conn,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<RequestOctets, Conn> Service<RequestOctets> for MyService<RequestOctets, Conn>
-where
-    RequestOctets: AsRef<[u8]> + Clone + Debug + Octets + Send + Sync + 'static,
-    Conn: Clone + SendRequest<RequestMessage<RequestOctets>> + Send + Sync + 'static,
-{
-    type Target = Vec<u8>;
-    type Stream = Once<Ready<ServiceResult<Self::Target>>>;
-    type Future = Pin<Box<dyn Future<Output = Self::Stream> + Send>>;
-
-    fn call(&self, request: Request<RequestOctets>) -> Self::Future {
-        let conn = self.conn.clone();
-        let fut = async move {
-            let now = Instant::now();
-            let msg: Message<RequestOctets> = request.message().as_ref().clone();
-
-            // The middleware layer will take care of the ID in the reply.
-
-            // We get a Message, but the client transport needs a ComposeRequest
-            // (which is implemented by RequestMessage). Convert.
-
-            let do_bit = dnssec_ok(&msg);
-            // We get a Message, but the client transport needs a
-            // BaseMessageBuilder. Convert.
-            println!("request {:?}", msg);
-            let mut request_msg = RequestMessage::new(msg).unwrap();
-            println!("request {:?}", request_msg);
-            // Set the DO bit if it is set in the request.
-            if do_bit {
-                request_msg.set_dnssec_ok(true);
-            }
-
-            let mut query = conn.send_request(request_msg);
-            let reply = query.get_response().await.unwrap();
-            println!("query_service: response after {:?}", now.elapsed());
-            println!("got reply {:?}", reply);
-
-            // We get the reply as Message from the client transport but
-            // we need to return an AdditionalBuilder with a StreamTarget. Convert.
-            let stream = to_stream_additional::<_, _>(&reply).unwrap();
-            once(ready(Ok(CallResult::new(stream))))
-        };
-        Box::pin(fut)
-    }
+    /// Optional port
+    port: Option<String>,
 }
 
 /// A buffer based on Vec.
@@ -531,8 +424,14 @@ type VecU8 = Vec<u8>;
 async fn main() {
     let args = Args::parse();
 
-    let f = File::open(args.config).unwrap();
-    let conf: Config = serde_json::from_reader(f).unwrap();
+    let mut f = File::open(&args.config).unwrap();
+    let conf: Config = if args.config.ends_with(".json") {
+        serde_json::from_reader(f).unwrap()
+    } else {
+        let mut str = String::new();
+        f.read_to_string(&mut str).unwrap();
+        toml::from_str(&str).unwrap()
+    };
 
     println!("Got: {:?}", conf);
 
@@ -548,7 +447,7 @@ async fn main() {
             start_single_service(qr, &conf.server).await
         }
         TopUpstreamConfig::Redundant(redun_conf) => {
-            let redun = get_cvredun(&redun_conf).await;
+            let redun = get_cvredun(redun_conf).await;
             start_cache_validator_service(
                 &redun_conf.cache,
                 &redun_conf.validator,
@@ -558,25 +457,34 @@ async fn main() {
             .await
         }
         TopUpstreamConfig::LoadBalancer(lb_conf) => {
-            let redun = get_cvlb(&lb_conf).await;
+            let redun = get_cvlb(lb_conf).await;
             start_cache_validator_service(&lb_conf.cache, &lb_conf.validator, redun, &conf.server)
                 .await
         }
         TopUpstreamConfig::Tcp(tcp_conf) => {
-            let tcp = get_tcp::<RequestMessage<VecU8>>(&tcp_conf);
-            start_conn_service(tcp, &conf.server).await
+            let tcp = get_cvtcp::<RequestMessage<VecU8>>(tcp_conf);
+            start_cache_validator_service(&tcp_conf.cache, &tcp_conf.validator, tcp, &conf.server)
+                .await
         }
         TopUpstreamConfig::Tls(tls_conf) => {
-            let tls = get_tls::<RequestMessage<VecU8>>(&tls_conf);
-            start_conn_service(tls, &conf.server).await
+            let tls = get_cvtls::<RequestMessage<VecU8>>(tls_conf);
+            start_cache_validator_service(&tls_conf.cache, &tls_conf.validator, tls, &conf.server)
+                .await
         }
         TopUpstreamConfig::Udp(udp_conf) => {
-            let udp = get_udp::<RequestMessage<VecU8>>(&udp_conf);
-            start_conn_service(udp, &conf.server).await
+            let udp = get_cvudp::<RequestMessage<VecU8>>(udp_conf);
+            start_cache_validator_service(&udp_conf.cache, &udp_conf.validator, udp, &conf.server)
+                .await
         }
         TopUpstreamConfig::UdpTcp(udptcp_conf) => {
-            let udptcp = get_udptcp::<RequestMessage<VecU8>>(&udptcp_conf);
-            start_conn_service(udptcp, &conf.server).await
+            let udptcp = get_cvudptcp::<RequestMessage<VecU8>>(udptcp_conf);
+            start_cache_validator_service(
+                &udptcp_conf.cache,
+                &udptcp_conf.validator,
+                udptcp,
+                &conf.server,
+            )
+            .await
         }
     };
 
@@ -715,9 +623,54 @@ fn get_tcp<CR: ComposeRequest + Clone + 'static>(
     conn
 }
 
+/// Get a TCP transport based on its config
+fn get_cvtcp<CR: ComposeRequest + Clone + 'static>(
+    config: &CVTcpConfig,
+) -> impl SendRequest<CR> + Clone + Send + Sync {
+    let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
+    let tcp_connect = TcpConnect::new(sockaddr);
+
+    let (conn, transport) = multi_stream::Connection::new(tcp_connect);
+    tokio::spawn(async move {
+        transport.run().await;
+        println!("run terminated");
+    });
+
+    conn
+}
+
 /// Get a TLS transport based on its config
 fn get_tls<CR: ComposeRequest + Clone + 'static>(
     config: &TlsConfig,
+) -> impl SendRequest<CR> + Clone + Send + Sync {
+    let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 853);
+
+    // Some TLS boiler plate for the root certificates.
+    let root_store = RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.into(),
+    };
+
+    let client_config = ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+
+    let tls_connect = TlsConnect::new(
+        client_config,
+        String::from(config.servername.as_str()).try_into().unwrap(),
+        sockaddr,
+    );
+    let (conn, transport) = multi_stream::Connection::new(tls_connect);
+    tokio::spawn(async move {
+        transport.run().await;
+        println!("run terminated");
+    });
+
+    conn
+}
+
+/// Get a TLS transport based on its config
+fn get_cvtls<CR: ComposeRequest + Clone + 'static>(
+    config: &CVTlsConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
     let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 853);
 
@@ -754,9 +707,34 @@ fn get_udp<CR: ComposeRequest + Clone + 'static>(
     dgram::Connection::new(udp_connect)
 }
 
+/// Get a UDP-only transport based on its config
+fn get_cvudp<CR: ComposeRequest + Clone + 'static>(
+    config: &CVUdpConfig,
+) -> impl SendRequest<CR> + Clone + Send + Sync {
+    let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
+
+    let udp_connect = UdpConnect::new(sockaddr);
+    dgram::Connection::new(udp_connect)
+}
+
 /// Get a UDP+TCP transport based on its config
 fn get_udptcp<CR: ComposeRequest + Clone + Debug + 'static>(
     config: &UdpTcpConfig,
+) -> impl SendRequest<CR> + Clone + Send + Sync {
+    let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
+    let udp_connect = UdpConnect::new(sockaddr);
+    let tcp_connect = TcpConnect::new(sockaddr);
+    let (conn, transport) = dgram_stream::Connection::new(udp_connect, tcp_connect);
+    tokio::spawn(async move {
+        transport.run().await;
+        println!("run terminated");
+    });
+    conn
+}
+
+/// Get a UDP+TCP transport based on its config
+fn get_cvudptcp<CR: ComposeRequest + Clone + Debug + 'static>(
+    config: &CVUdpTcpConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
     let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
     let udp_connect = UdpConnect::new(sockaddr);
@@ -944,13 +922,11 @@ async fn start_conn_service(
 ) -> Vec<JoinHandle<()>>
 where
 {
-    let svc = MyService::new(conn);
-
-    let svc = is_service(svc);
+    //let svc = MyService::new(conn);
+    let svc = ClientTransportToSingleService::new(conn);
+    let svc = SingleServiceToService::<_, _, ReplyMessage>::new(svc);
 
     let svc = Arc::new(build_middleware_chain(svc));
-
-    let svc = is_service(svc);
 
     start_service(svc, server_config).await
 }
@@ -987,16 +963,24 @@ where
 
                 let mut handles = Vec::new();
 
-                let certs = rustls_pemfile::certs(&mut BufReader::new(
-                    File::open("examples/sample.pem").unwrap(),
-                ))
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
-                let key = rustls_pemfile::private_key(&mut BufReader::new(
-                    File::open("examples/sample.rsa").unwrap(),
-                ))
-                .unwrap()
-                .unwrap();
+                let file = match File::open(&sl_config.certificate) {
+                    Ok(file) => file,
+                    Err(e) => panic!(
+                        "Unable to open certificate file {}: {e}",
+                        sl_config.certificate
+                    ),
+                };
+                let certs = rustls_pemfile::certs(&mut BufReader::new(file))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+
+                let file = match File::open(&sl_config.key) {
+                    Ok(file) => file,
+                    Err(e) => panic!("Unable to open key file {}: {e}", sl_config.key),
+                };
+                let key = rustls_pemfile::private_key(&mut BufReader::new(file))
+                    .unwrap()
+                    .unwrap();
 
                 let config = rustls::ServerConfig::builder()
                     .with_no_client_auth()
@@ -1092,20 +1076,4 @@ fn get_sockaddr(addr: &str, port: Option<&str>, default_port: u16) -> SocketAddr
     };
 
     SocketAddr::new(IpAddr::from_str(addr).unwrap(), port)
-}
-
-/// Return whether the DO flag is set.
-fn dnssec_ok<Octs: Octets>(msg: &Message<Octs>) -> bool {
-    if let Some(opt) = msg.opt() {
-        opt.dnssec_ok()
-    } else {
-        false
-    }
-}
-
-fn is_service<T>(t: T) -> T
-where
-    T: Service,
-{
-    t
 }
