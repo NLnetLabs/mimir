@@ -30,6 +30,7 @@ use domain::net::server::service::{CallResult, Service, ServiceError, ServiceRes
 use domain::net::server::single_service::ComposeReply;
 use domain::net::server::single_service::ReplyMessage;
 use domain::net::server::single_service::SingleService;
+use domain::net::server::sock::AsyncAccept;
 use domain::net::server::stream::StreamServer;
 use domain::rdata::AllRecordData;
 use domain::validator::anchor::TrustAnchors;
@@ -40,6 +41,8 @@ use serde_aux::field_attributes::bool_true;
 use std::fmt::Debug;
 use std::fs::File;
 use std::future::{ready, Future, Ready};
+use std::io;
+use std::io::BufReader;
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -48,19 +51,17 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use std::time::Instant;
-use tokio::net::{TcpListener, UdpSocket};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
+use tokio_rustls::rustls;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+use tokio_rustls::TlsAcceptor;
 
 /// Arguments parser.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Option for the local port.
-    #[arg(long = "locport", value_parser = clap::value_parser!(u16))]
-    locport: Option<u16>,
-
     /// Configuration
     config: String,
 }
@@ -76,7 +77,37 @@ struct Config {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ServerConfig {
-    port: String,
+    listen: Vec<ListenConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type")]
+enum ListenConfig {
+    #[serde(rename = "UDP+TCP")]
+    UdpTcp(SimpleListenConfig),
+
+    #[serde(rename = "UDP-only")]
+    Udp(SimpleListenConfig),
+
+    #[serde(rename = "TCP")]
+    Tcp(SimpleListenConfig),
+
+    #[serde(rename = "TLS")]
+    Tls(TlsListenConfig),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct SimpleListenConfig {
+    port: Option<u16>,
+    addr: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct TlsListenConfig {
+    port: Option<u16>,
+    addr: Option<String>,
+    certificate: String,
+    key: String,
 }
 
 /// Configure for upstream config at the top level.
@@ -424,7 +455,7 @@ impl<RequestOctets, Conn> MyService<RequestOctets, Conn> {
 
 impl<RequestOctets, Conn> Service<RequestOctets> for MyService<RequestOctets, Conn>
 where
-    RequestOctets: AsRef<[u8]> + Clone + Debug + Octets + Send + Sync + Unpin + 'static,
+    RequestOctets: AsRef<[u8]> + Clone + Debug + Octets + Send + Sync + 'static,
     Conn: Clone + SendRequest<RequestMessage<RequestOctets>> + Send + Sync + 'static,
 {
     type Target = Vec<u8>;
@@ -509,74 +540,62 @@ async fn main() {
 
     println!("Got toml:\n{toml}");
 
-    let locport = args.locport.unwrap_or_else(|| "8053".parse().unwrap());
-    let buf_source = Arc::new(VecBufSource);
-    let udpsocket2 = UdpSocket::bind(SocketAddr::new("::1".parse().unwrap(), locport))
-        .await
-        .unwrap();
-    let tcplistener = TcpListener::bind(SocketAddr::new("::1".parse().unwrap(), locport))
-        .await
-        .unwrap();
-
     // We cannot use get_transport because we cannot pass a Box<dyn ...> to
     // query_service because it lacks Clone.
-    let udp_join_handle = match conf.upstream {
+    let join_handles = match &conf.upstream {
         TopUpstreamConfig::Qname(qname_conf) => {
             let qr = get_qname_router::<ReplyMessage>(qname_conf).await;
-            start_single_service(qr, udpsocket2, tcplistener, buf_source)
+            start_single_service(qr, &conf.server).await
         }
         TopUpstreamConfig::Redundant(redun_conf) => {
             let redun = get_cvredun(&redun_conf).await;
             start_cache_validator_service(
-                redun_conf.cache,
-                redun_conf.validator,
+                &redun_conf.cache,
+                &redun_conf.validator,
                 redun,
-                udpsocket2,
-                tcplistener,
-                buf_source,
+                &conf.server,
             )
+            .await
         }
         TopUpstreamConfig::LoadBalancer(lb_conf) => {
             let redun = get_cvlb(&lb_conf).await;
-            start_cache_validator_service(
-                lb_conf.cache,
-                lb_conf.validator,
-                redun,
-                udpsocket2,
-                tcplistener,
-                buf_source,
-            )
+            start_cache_validator_service(&lb_conf.cache, &lb_conf.validator, redun, &conf.server)
+                .await
         }
         TopUpstreamConfig::Tcp(tcp_conf) => {
             let tcp = get_tcp::<RequestMessage<VecU8>>(&tcp_conf);
-            start_service(tcp, udpsocket2, tcplistener, buf_source)
+            start_conn_service(tcp, &conf.server).await
         }
         TopUpstreamConfig::Tls(tls_conf) => {
             let tls = get_tls::<RequestMessage<VecU8>>(&tls_conf);
-            start_service(tls, udpsocket2, tcplistener, buf_source)
+            start_conn_service(tls, &conf.server).await
         }
         TopUpstreamConfig::Udp(udp_conf) => {
             let udp = get_udp::<RequestMessage<VecU8>>(&udp_conf);
-            start_service(udp, udpsocket2, tcplistener, buf_source)
+            start_conn_service(udp, &conf.server).await
         }
         TopUpstreamConfig::UdpTcp(udptcp_conf) => {
             let udptcp = get_udptcp::<RequestMessage<VecU8>>(&udptcp_conf);
-            start_service(udptcp, udpsocket2, tcplistener, buf_source)
+            start_conn_service(udptcp, &conf.server).await
         }
     };
 
-    udp_join_handle.await.unwrap();
+    for j in join_handles {
+        println!("Waiting {:?}", j);
+        let res = j.await;
+        println!("Got res {:?}", res);
+    }
 }
 
 /// Get a qname router based on its config
-async fn get_qname_router<CR>(config: QnameConfig) -> QnameRouter<Vec<u8>, VecU8, CR>
+async fn get_qname_router<CR>(config: &QnameConfig) -> QnameRouter<Vec<u8>, VecU8, CR>
 where
     CR: ComposeReply + Send + Sync + 'static,
 {
     println!("Creating new QnameRouter");
     let mut qr = QnameRouter::new();
     println!("Adding to QnameRouter");
-    for e in config.domains {
+    for e in &config.domains {
         println!("Add to QnameRouter");
         let transp = get_qr_transport(&e.upstream, &e.cache, &e.validator).await;
         let svc = BoxClientTransportToSingleService::new(transp);
@@ -853,14 +872,37 @@ fn box_cache(
     }
 }
 
-fn start_cache_validator_service(
-    cache_conf: Option<CacheConfig>,
-    validator_conf: Option<ValidatorConfig>,
-    conn: impl SendRequest<RequestMessage<VecU8>> + Clone + Send + Sync + 'static,
-    socket: UdpSocket,
+//--- RustlsTcpListener
+
+pub struct RustlsTcpListener {
     listener: TcpListener,
-    buf_source: Arc<VecBufSource>,
-) -> JoinHandle<()> {
+    acceptor: tokio_rustls::TlsAcceptor,
+}
+
+impl RustlsTcpListener {
+    pub fn new(listener: TcpListener, acceptor: tokio_rustls::TlsAcceptor) -> Self {
+        Self { listener, acceptor }
+    }
+}
+
+impl AsyncAccept for RustlsTcpListener {
+    type Error = io::Error;
+    type StreamType = tokio_rustls::server::TlsStream<TcpStream>;
+    type Future = tokio_rustls::Accept<TcpStream>;
+
+    #[allow(clippy::type_complexity)]
+    fn poll_accept(&self, cx: &mut Context) -> Poll<Result<(Self::Future, SocketAddr), io::Error>> {
+        TcpListener::poll_accept(&self.listener, cx)
+            .map(|res| res.map(|(stream, addr)| (self.acceptor.accept(stream), addr)))
+    }
+}
+
+async fn start_cache_validator_service(
+    cache_conf: &Option<CacheConfig>,
+    validator_conf: &Option<ValidatorConfig>,
+    conn: impl SendRequest<RequestMessage<VecU8>> + Clone + Send + Sync + 'static,
+    server_config: &ServerConfig,
+) -> Vec<JoinHandle<()>> {
     match validator_conf {
         Some(validator_conf) => {
             if validator_conf.enabled {
@@ -868,83 +910,177 @@ fn start_cache_validator_service(
                 let ta = TrustAnchors::from_reader(anchor_file).unwrap();
                 let vc = Arc::new(ValidationContext::new(ta, conn.clone()));
                 let conn = validator::Connection::new(conn, vc);
-                start_cache_service(cache_conf, conn, socket, listener, buf_source)
+                start_cache_service(cache_conf, conn, server_config).await
             } else {
-                start_cache_service(cache_conf, conn, socket, listener, buf_source)
+                start_cache_service(cache_conf, conn, server_config).await
             }
         }
-        None => start_cache_service(cache_conf, conn, socket, listener, buf_source),
+        None => start_cache_service(cache_conf, conn, server_config).await,
     }
 }
 
-fn start_cache_service(
-    cache_conf: Option<CacheConfig>,
+async fn start_cache_service(
+    cache_conf: &Option<CacheConfig>,
     conn: impl SendRequest<RequestMessage<VecU8>> + Clone + Send + Sync + 'static,
-    socket: UdpSocket,
-    listener: TcpListener,
-    buf_source: Arc<VecBufSource>,
-) -> JoinHandle<()> {
+    server_config: &ServerConfig,
+) -> Vec<JoinHandle<()>> {
     match cache_conf {
         Some(cache_conf) => {
             if cache_conf.enabled {
                 let conn = cache::Connection::new(conn);
-                start_service(conn, socket, listener, buf_source)
+                start_conn_service(conn, server_config).await
             } else {
-                start_service(conn, socket, listener, buf_source)
+                start_conn_service(conn, server_config).await
             }
         }
-        None => start_service(conn, socket, listener, buf_source),
+        None => start_conn_service(conn, server_config).await,
     }
 }
 
 /// Start a service based on a transport, a UDP server socket and a buffer
-fn start_service(
+async fn start_conn_service(
     conn: impl SendRequest<RequestMessage<VecU8>> + Clone + Send + Sync + 'static,
-    socket: UdpSocket,
-    listener: TcpListener,
-    buf_source: Arc<VecBufSource>,
-) -> JoinHandle<()>
+    server_config: &ServerConfig,
+) -> Vec<JoinHandle<()>>
 where
 {
     let svc = MyService::new(conn);
-    let svc = Arc::new(build_middleware_chain(svc));
-    let config = server::dgram::Config::new();
-    let srv = DgramServer::with_config(socket, buf_source.clone(), svc.clone(), config);
-    let srv = Arc::new(srv);
-    tokio::spawn(async move { srv.run().await });
 
-    let conn_config = server::ConnectionConfig::new();
-    let mut config = server::stream::Config::new();
-    config.set_connection_config(conn_config);
-    let srv = StreamServer::with_config(listener, buf_source, svc, config);
-    let srv = Arc::new(srv);
-    tokio::spawn(async move { srv.run().await })
+    let svc = is_service(svc);
+
+    let svc = Arc::new(build_middleware_chain(svc));
+
+    let svc = is_service(svc);
+
+    start_service(svc, server_config).await
+}
+
+async fn start_service<SVC>(svc: SVC, config: &ServerConfig) -> Vec<JoinHandle<()>>
+where
+    SVC: Service + Clone + Send + Sync + 'static,
+    SVC::Future: Send,
+    SVC::Stream: Send,
+    SVC::Target: Composer + Default + Send + Sync,
+{
+    let mut handles = Vec::new();
+
+    for l in &config.listen {
+        match l {
+            ListenConfig::UdpTcp(sl_config) => {
+                handles.append(&mut start_service_udp_tcp(sl_config, true, true, svc.clone()).await)
+            }
+            ListenConfig::Udp(sl_config) => handles
+                .append(&mut start_service_udp_tcp(sl_config, true, false, svc.clone()).await),
+            ListenConfig::Tcp(sl_config) => handles
+                .append(&mut start_service_udp_tcp(sl_config, false, true, svc.clone()).await),
+            ListenConfig::Tls(sl_config) => {
+                let locport = sl_config.port.unwrap_or_else(|| "53".parse().unwrap());
+                let sockaddr = SocketAddr::new(
+                    match &sl_config.addr {
+                        Some(addr) => addr.parse(),
+                        None => "::1".parse(),
+                    }
+                    .unwrap(),
+                    locport,
+                );
+                let buf_source = Arc::new(VecBufSource);
+
+                let mut handles = Vec::new();
+
+                let certs = rustls_pemfile::certs(&mut BufReader::new(
+                    File::open("examples/sample.pem").unwrap(),
+                ))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+                let key = rustls_pemfile::private_key(&mut BufReader::new(
+                    File::open("examples/sample.rsa").unwrap(),
+                ))
+                .unwrap()
+                .unwrap();
+
+                let config = rustls::ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(certs, key)
+                    .unwrap();
+
+                let acceptor = TlsAcceptor::from(Arc::new(config));
+                let listener = TcpListener::bind(sockaddr).await.unwrap();
+                let listener = RustlsTcpListener::new(listener, acceptor);
+
+                let conn_config = server::ConnectionConfig::new();
+                let mut config = server::stream::Config::new();
+                config.set_connection_config(conn_config);
+                let srv = StreamServer::with_config(listener, buf_source, svc.clone(), config);
+                let srv = Arc::new(srv);
+                handles.push(tokio::spawn(async move { srv.run().await }));
+            }
+        }
+    }
+
+    handles
+}
+
+async fn start_service_udp_tcp<SVC>(
+    sl_config: &SimpleListenConfig,
+    do_udp: bool,
+    do_tcp: bool,
+    svc: SVC,
+) -> Vec<JoinHandle<()>>
+where
+    SVC: Service + Clone + Send + Sync + 'static,
+    SVC::Future: Send,
+    SVC::Stream: Send,
+    SVC::Target: Composer + Default + Send + Sync,
+{
+    let locport = sl_config.port.unwrap_or_else(|| "53".parse().unwrap());
+    let sockaddr = SocketAddr::new(
+        match &sl_config.addr {
+            Some(addr) => addr.parse(),
+            None => "::1".parse(),
+        }
+        .unwrap(),
+        locport,
+    );
+    let buf_source = Arc::new(VecBufSource);
+
+    let mut handles = Vec::new();
+
+    if do_udp {
+        let socket = UdpSocket::bind(sockaddr).await.unwrap();
+
+        let config = server::dgram::Config::new();
+        let srv = DgramServer::with_config(socket, buf_source.clone(), svc.clone(), config);
+        let srv = Arc::new(srv);
+        handles.push(tokio::spawn(async move { srv.run().await }));
+    }
+
+    if do_tcp {
+        let listener = TcpListener::bind(sockaddr).await.unwrap();
+
+        let conn_config = server::ConnectionConfig::new();
+        let mut config = server::stream::Config::new();
+        config.set_connection_config(conn_config);
+        let srv = StreamServer::with_config(listener, buf_source, svc, config);
+        let srv = Arc::new(srv);
+        handles.push(tokio::spawn(async move { srv.run().await }));
+    }
+
+    handles
 }
 
 /// Start a service based on a SingleService, a UDP server socket and a buffer
-fn start_single_service<CR, SVC>(
+async fn start_single_service<CR, SVC>(
     svc: SVC,
-    socket: UdpSocket,
-    listener: TcpListener,
-    buf_source: Arc<VecBufSource>,
-) -> JoinHandle<()>
+    server_config: &ServerConfig,
+) -> Vec<JoinHandle<()>>
 where
     SVC: SingleService<VecU8, CR> + Send + Sync + 'static,
     CR: ComposeReply + Send + Sync + 'static,
 {
     let svc = SingleServiceToService::<VecU8, SVC, CR>::new(svc);
     let svc = Arc::new(build_middleware_chain(svc));
-    let config = server::dgram::Config::new();
-    let srv = DgramServer::with_config(socket, buf_source.clone(), svc.clone(), config);
-    let srv = Arc::new(srv);
-    tokio::spawn(async move { srv.run().await });
 
-    let conn_config = server::ConnectionConfig::new();
-    let mut config = server::stream::Config::new();
-    config.set_connection_config(conn_config);
-    let srv = StreamServer::with_config(listener, buf_source, svc, config);
-    let srv = Arc::new(srv);
-    tokio::spawn(async move { srv.run().await })
+    start_service(svc, server_config).await
 }
 
 /// Get a socket address for an IP address, and optional port and a
@@ -965,4 +1101,11 @@ fn dnssec_ok<Octs: Octets>(msg: &Message<Octs>) -> bool {
     } else {
         false
     }
+}
+
+fn is_service<T>(t: T) -> T
+where
+    T: Service,
+{
+    t
 }
