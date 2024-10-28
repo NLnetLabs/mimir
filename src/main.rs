@@ -45,7 +45,6 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsAcceptor;
@@ -565,13 +564,6 @@ async fn get_lb(config: &LoadBalancerConfig) -> load_balancer::Connection<Reques
             .unwrap();
         println!("After Add to load_balancer::Connection");
     }
-    let lb2 = lb.clone();
-    tokio::spawn(async move {
-        loop {
-            lb2.print_stats().await;
-            sleep(Duration::from_secs(60)).await;
-        }
-    });
     lb
 }
 
@@ -597,13 +589,6 @@ async fn get_cvlb(
             .unwrap();
         println!("After Add to load_balancer::Connection");
     }
-    let lb2 = lb.clone();
-    tokio::spawn(async move {
-        loop {
-            lb2.print_stats().await;
-            sleep(Duration::from_secs(60)).await;
-        }
-    });
     lb
 }
 
