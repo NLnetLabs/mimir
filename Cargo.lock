@@ -18,6 +18,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6aa100a6f6f525226719f8de3f70076be4f4191801ebd92621450d1c51e9053d"
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e60d3430d3a69478ad0993f19238d2df97c507009a52b3c10addcd7f6bcb916"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -233,9 +242,12 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.0.72"
+version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22a9137b95ea06864e018375b72adfb7db6e6f68cfc8df5a04d00288050485ee"
+checksum = "fd9de9f2205d5ef3fd67e685b0df337994ddd4495e2a28d185500d0e1edfea47"
+dependencies = [
+ "shlex",
+]
 
 [[package]]
 name = "cexpr"
@@ -439,7 +451,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "chrono",
- "futures-util 0.3.31",
+ "futures-util",
  "hashbrown",
  "libc",
  "moka",
@@ -463,12 +475,14 @@ version = "0.1.0"
 dependencies = [
  "anstyle",
  "bytes",
+ "cc",
  "clap",
  "clap_lex",
  "domain",
  "futures",
- "futures-util 0.2.0",
+ "futures-util",
  "octseq 0.2.0",
+ "regex",
  "rustls-pemfile",
  "serde",
  "serde-aux",
@@ -479,6 +493,7 @@ dependencies = [
  "tokio-rustls",
  "toml",
  "webpki-roots",
+ "winapi",
 ]
 
 [[package]]
@@ -507,7 +522,7 @@ checksum = "f639046355ee4f37944e44f60642c6f3a7efa3cf6b78c78a0d989a8ce6c396a1"
 dependencies = [
  "errno-dragonfly",
  "libc",
- "winapi 0.3.0",
+ "winapi",
 ]
 
 [[package]]
@@ -560,22 +575,13 @@ version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90fa4cc29d25b0687b8570b0da86eac698dcb525110ad8b938fe6712baa711ec"
 dependencies = [
- "futures-channel 0.3.31",
- "futures-core 0.3.31",
+ "futures-channel",
+ "futures-core",
  "futures-executor",
- "futures-io 0.3.31",
- "futures-sink 0.3.31",
+ "futures-io",
+ "futures-sink",
  "futures-task",
- "futures-util 0.3.31",
-]
-
-[[package]]
-name = "futures-channel"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97df0a1c00918ce354a0581fe171437e650119d24b2eaada918dd3fc4de492b4"
-dependencies = [
- "futures-core 0.2.0",
+ "futures-util",
 ]
 
 [[package]]
@@ -584,17 +590,8 @@ version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dff15bf788c671c1934e366d07e30c1814a8ef514e1af724a602e8a2fbe1b10"
 dependencies = [
- "futures-core 0.3.31",
- "futures-sink 0.3.31",
-]
-
-[[package]]
-name = "futures-core"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c1f19984411d526ffd294a35cff5a560ab6d4facb6e27532158653eea484b97"
-dependencies = [
- "either",
+ "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -609,19 +606,9 @@ version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0cb59f15119671c94cd9cc543dc9a50b8d5edc468b4ff5f0bb8567f66c6b48a"
 dependencies = [
- "futures-core 0.3.31",
+ "futures-core",
  "futures-task",
- "futures-util 0.3.31",
-]
-
-[[package]]
-name = "futures-io"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4c543fdb523abd1dde0bf0ff97eef0ba9bd99e6fecd30d82b89fc7b53e34dd3"
-dependencies = [
- "futures-core 0.2.0",
- "iovec",
+ "futures-util",
 ]
 
 [[package]]
@@ -643,16 +630,6 @@ dependencies = [
 
 [[package]]
 name = "futures-sink"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06f64793ea6cadacdcc5583f8ef92f967a787a5a32ef89c6c7a7dba14ed75c04"
-dependencies = [
- "futures-channel 0.2.0",
- "futures-core 0.2.0",
-]
-
-[[package]]
-name = "futures-sink"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e575fab7d1e0dcb8d0c7bcf9a63ee213816ab51902e6d244a95819acacf1d4f7"
@@ -665,28 +642,15 @@ checksum = "f90f7dce0722e95104fcb095585910c0977252f286e354b5e3bd38902cd99988"
 
 [[package]]
 name = "futures-util"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbddcd360db286a017439a08bc99e8408b68042e486715173b0b9d3950dbd796"
-dependencies = [
- "either",
- "futures-channel 0.2.0",
- "futures-core 0.2.0",
- "futures-io 0.2.0",
- "futures-sink 0.2.0",
-]
-
-[[package]]
-name = "futures-util"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9fa08315bb612088cc391249efdc3bc77536f16c91f6cf495e6fbe85b20a4a81"
 dependencies = [
- "futures-channel 0.3.31",
- "futures-core 0.3.31",
- "futures-io 0.3.31",
+ "futures-channel",
+ "futures-core",
+ "futures-io",
  "futures-macro",
- "futures-sink 0.3.31",
+ "futures-sink",
  "futures-task",
  "memchr",
  "pin-project-lite",
@@ -789,16 +753,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iovec"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29d062ee61fccdf25be172e70f34c9f6efc597e1fb8f6526e8437b2046ab26be"
-dependencies = [
- "libc",
- "winapi 0.2.0",
-]
-
-[[package]]
 name = "is-terminal"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -849,7 +803,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2c979a19ffb457f0273965c333053f3d586bf759bf7b683fbebc37f9a9ebedc4"
 dependencies = [
- "winapi 0.3.0",
+ "winapi",
 ]
 
 [[package]]
@@ -944,7 +898,7 @@ dependencies = [
  "crossbeam-channel",
  "crossbeam-epoch",
  "crossbeam-utils",
- "futures-util 0.3.31",
+ "futures-util",
  "once_cell",
  "parking_lot",
  "quanta",
@@ -1104,7 +1058,7 @@ dependencies = [
  "raw-cpuid",
  "wasi",
  "web-sys",
- "winapi 0.3.0",
+ "winapi",
 ]
 
 [[package]]
@@ -1192,18 +1146,32 @@ dependencies = [
 
 [[package]]
 name = "regex"
-version = "1.5.0"
+version = "1.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a250501c60d8ee37c3c8cd93d95344a4653ce4999136cc9b3eb4c98770a4aea3"
+checksum = "12de2eff854e5fa4b1295edd650e227e9d8fb0c9e90b12e7f36d6a6811791a29"
 dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-automata"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49530408a136e16e5b486e883fbb6ba058e8e4e8ae6621a77b048b314336e629"
+dependencies = [
+ "aho-corasick",
+ "memchr",
  "regex-syntax",
 ]
 
 [[package]]
 name = "regex-syntax"
-version = "0.6.24"
+version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00efb87459ba4f6fb2169d20f68565555688e1250ee6825cdf6254f8b48fafb2"
+checksum = "dbb5fb1acd8a1a18b3dd5be62d25485eb770e05afb408a9627d14d451bae12da"
 
 [[package]]
 name = "remove_dir_all"
@@ -1211,7 +1179,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfc5b3ce5d5ea144bb04ebd093a9e14e9765bcfec866aecda9b6dec43b3d1e24"
 dependencies = [
- "winapi 0.3.0",
+ "winapi",
 ]
 
 [[package]]
@@ -1331,7 +1299,7 @@ version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f3257af0472da4b8b8902102a57bafffd9991f0f43772a8af6153d597e6e4ae2"
 dependencies = [
- "winapi 0.3.0",
+ "winapi",
 ]
 
 [[package]]
@@ -1434,9 +1402,9 @@ dependencies = [
 
 [[package]]
 name = "shlex"
-version = "1.0.0"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42a568c8f2cd051a4d283bd6eb0343ac214c1b0f1ac19f93e1175b2dee38c73d"
+checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "siphasher"
@@ -1537,7 +1505,7 @@ dependencies = [
  "rand 0.4.1",
  "redox_syscall 0.1.0",
  "remove_dir_all",
- "winapi 0.3.0",
+ "winapi",
 ]
 
 [[package]]
@@ -1630,7 +1598,7 @@ version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4cdeb73537e63f98adcd73138af75e3f368ccaecffaa29d7eb61b9f5a440457"
 dependencies = [
- "futures-core 0.3.31",
+ "futures-core",
  "pin-project-lite",
  "tokio",
 ]
@@ -1761,7 +1729,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1b768ba943161a9226ccd59b26bcd901e5d60e6061f4fcad3034784e0c7372b"
 dependencies = [
  "same-file",
- "winapi 0.3.0",
+ "winapi",
 ]
 
 [[package]]
@@ -1856,12 +1824,6 @@ dependencies = [
 
 [[package]]
 name = "winapi"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "468147912ffe83a3601aeac78ed7b09ea8e357ccf5479fd47e8e8abff9e589eb"
-
-[[package]]
-name = "winapi"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3ad91d846a4a5342c1fb7008d26124ee6cf94a3953751618577295373b32117"
@@ -1888,7 +1850,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9dc3aa9dcda98b5a16150c54619c1ead22e3d3a5d458778ae914be760aa981a"
 dependencies = [
- "winapi 0.3.0",
+ "winapi",
 ]
 
 [[package]]

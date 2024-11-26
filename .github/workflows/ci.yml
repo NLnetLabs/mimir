@@ -19,6 +19,11 @@ jobs:
         rust-version: ${{ matrix.rust }}
     - if: matrix.rust == 'stable'
       run: rustup component add clippy
+    - if: matrix.os == 'windows-latest'
+      run: rustup component add rustfmt
+    - if: matrix.os == 'windows-latest'
+      # https://github.com/actions/runner-images/issues/6070#issuecomment-1214677285
+      uses: ilammy/setup-nasm@v1
     - if: matrix.rust == 'stable'
       run: cargo clippy --all-features --all-targets -- -D warnings
     - run: cargo check --no-default-features --all-targets
