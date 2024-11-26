@@ -35,9 +35,3 @@ regex = "1.7.1"
 # error: type `HKEY__` is private 
 [target.'cfg(windows)'.dependencies]
 winapi = "0.3"
-
-# Work around for Windows 2022 Server, as used by GitHub Actions CI
-# 'windows-latest'.
-# See: https://github.com/rust-lang/cmake-rs/issues/141#issuecomment-1041992139
-[target.'cfg(windows)'.patch.crates-io]
-cc = { git = "https://github.com/alexcrichton/cc-rs" }
