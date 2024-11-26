@@ -31,7 +31,9 @@ rustls-pemfile = "2.2.0"
 [target.'cfg(target_os = "macos")'.dependencies]
 regex = "1.7.1"
 
-# Work around for error when compiling on Windows:
-# error: type `HKEY__` is private 
+# Work around for errors when compiling on Windows:
 [target.'cfg(windows)'.dependencies]
+# error: type `HKEY__` is private 
 winapi = "0.3"
+# error: couldn't determine visual studio generator
+cc = "1.2"
