@@ -25,4 +25,13 @@ webpki-roots = "0.26"
 toml = "0.8.19"
 serde-aux = "4.5.0"
 rustls-pemfile = "2.2.0"
+
+# Work around for error when compiling on MacOS:
+# error[E0433]: failed to resolve: use of undeclared crate or module `syntax`
+[target.'cfg(target_os = "macos")'.dependencies]
 regex = "1.7.1"
+
+# Work around for error when compiling on Windows:
+# error: type `HKEY__` is private 
+[target.'cfg(windows)'.dependencies]
+winapi = "3"
