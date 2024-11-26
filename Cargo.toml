@@ -13,7 +13,7 @@ anstyle = "=1.0.1"
 time = "=0.3.23"
 domain = { version = "0.10.1-dev", git = "https://github.com/NLnetLabs/domain.git", features = [ "net", "unstable-client-transport", "unstable-server-transport", "unstable-zonetree", "unstable-validator", "zonefile", "tokio-rustls", "tokio-stream" ] }
 futures        = { version = "0.3" }
-futures-util = "0"
+futures-util = "0.3"
 octseq         = "0.2"
 #rustls = "0.26"
 serde = { version = "1.0.188", features = ["derive" ] }
@@ -25,6 +25,7 @@ webpki-roots = "0.26"
 toml = "0.8.19"
 serde-aux = "4.5.0"
 rustls-pemfile = "2.2.0"
+winapi = "^0.3"
 
 # Work around for error when compiling on MacOS:
 # error[E0433]: failed to resolve: use of undeclared crate or module `syntax`
@@ -33,7 +34,5 @@ regex = "1.7.1"
 
 # Work around for errors when compiling on Windows:
 [target.'cfg(windows)'.dependencies]
-# error: type `HKEY__` is private 
-winapi = "0.3"
 # error: couldn't determine visual studio generator
 cc = "1.2"
