@@ -34,4 +34,4 @@ regex = "1.7.1"
 # Work around for error when compiling on Windows:
 # error: type `HKEY__` is private 
 [target.'cfg(windows)'.dependencies]
-winapi = "3"
+winapi = "0.3"
