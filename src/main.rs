@@ -7,9 +7,12 @@ use clap::Parser;
 use domain::base::wire::Composer;
 use domain::base::Name;
 use domain::net::client::protocol::{TcpConnect, TlsConnect, UdpConnect};
-use domain::net::client::request::{ComposeRequest, RequestMessage, SendRequest};
+use domain::net::client::request::{
+    ComposeRequest, RequestMessage, SendRequest,
+};
 use domain::net::client::{
-    cache, dgram, dgram_stream, load_balancer, multi_stream, redundant, validator,
+    cache, dgram, dgram_stream, load_balancer, multi_stream, redundant,
+    validator,
 };
 use domain::net::server;
 use domain::net::server::adapter::BoxClientTransportToSingleService;
@@ -48,6 +51,11 @@ use tokio::task::JoinHandle;
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsAcceptor;
+
+const IANA_TRUST_ANCHOR: &str = "
+. IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D
+. IN DS 38696 8 2 683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16
+";
 
 /// Arguments parser.
 #[derive(Parser, Debug)]
@@ -245,6 +253,8 @@ struct CacheConfig {
 struct ValidatorConfig {
     #[serde(default = "bool_true")]
     enabled: bool,
+    #[serde(rename = "trust-anchor")]
+    trust_anchor: Option<String>,
 }
 
 /// Config for a redundant transport
@@ -411,7 +421,10 @@ struct VecSingle(Option<CallResult<Vec<u8>>>);
 impl Future for VecSingle {
     type Output = Result<CallResult<Vec<u8>>, ServiceError>;
 
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Self::Output> {
         Poll::Ready(Ok(self.0.take().unwrap()))
     }
 }
@@ -457,23 +470,43 @@ async fn main() {
         }
         TopUpstreamConfig::LoadBalancer(lb_conf) => {
             let redun = get_cvlb(lb_conf).await;
-            start_cache_validator_service(&lb_conf.cache, &lb_conf.validator, redun, &conf.server)
-                .await
+            start_cache_validator_service(
+                &lb_conf.cache,
+                &lb_conf.validator,
+                redun,
+                &conf.server,
+            )
+            .await
         }
         TopUpstreamConfig::Tcp(tcp_conf) => {
             let tcp = get_cvtcp::<RequestMessage<VecU8>>(tcp_conf);
-            start_cache_validator_service(&tcp_conf.cache, &tcp_conf.validator, tcp, &conf.server)
-                .await
+            start_cache_validator_service(
+                &tcp_conf.cache,
+                &tcp_conf.validator,
+                tcp,
+                &conf.server,
+            )
+            .await
         }
         TopUpstreamConfig::Tls(tls_conf) => {
             let tls = get_cvtls::<RequestMessage<VecU8>>(tls_conf);
-            start_cache_validator_service(&tls_conf.cache, &tls_conf.validator, tls, &conf.server)
-                .await
+            start_cache_validator_service(
+                &tls_conf.cache,
+                &tls_conf.validator,
+                tls,
+                &conf.server,
+            )
+            .await
         }
         TopUpstreamConfig::Udp(udp_conf) => {
             let udp = get_cvudp::<RequestMessage<VecU8>>(udp_conf);
-            start_cache_validator_service(&udp_conf.cache, &udp_conf.validator, udp, &conf.server)
-                .await
+            start_cache_validator_service(
+                &udp_conf.cache,
+                &udp_conf.validator,
+                udp,
+                &conf.server,
+            )
+            .await
         }
         TopUpstreamConfig::UdpTcp(udptcp_conf) => {
             let udptcp = get_cvudptcp::<RequestMessage<VecU8>>(udptcp_conf);
@@ -495,7 +528,9 @@ async fn main() {
 }
 
 /// Get a qname router based on its config
-async fn get_qname_router<CR>(config: &QnameConfig) -> QnameRouter<Vec<u8>, VecU8, CR>
+async fn get_qname_router<CR>(
+    config: &QnameConfig,
+) -> QnameRouter<Vec<u8>, VecU8, CR>
 where
     CR: ComposeReply + Send + Sync + 'static,
 {
@@ -504,7 +539,8 @@ where
     println!("Adding to QnameRouter");
     for e in &config.domains {
         println!("Add to QnameRouter");
-        let transp = get_qr_transport(&e.upstream, &e.cache, &e.validator).await;
+        let transp =
+            get_qr_transport(&e.upstream, &e.cache, &e.validator).await;
         let svc = BoxClientTransportToSingleService::new(transp);
         qr.add(Name::<Vec<u8>>::from_str(&e.name).unwrap(), svc);
         println!("After Add to QnameRouter");
@@ -513,7 +549,9 @@ where
 }
 
 /// Get a redundant transport based on its config
-async fn get_redun(config: &RedundantConfig) -> redundant::Connection<RequestMessage<VecU8>> {
+async fn get_redun(
+    config: &RedundantConfig,
+) -> redundant::Connection<RequestMessage<VecU8>> {
     println!("Creating new redundant::Connection");
     let (redun, transport) = redundant::Connection::new();
     tokio::spawn(async move {
@@ -529,7 +567,9 @@ async fn get_redun(config: &RedundantConfig) -> redundant::Connection<RequestMes
 }
 
 /// Get a redundant transport based on its config
-async fn get_cvredun(config: &CVRedundantConfig) -> redundant::Connection<RequestMessage<VecU8>> {
+async fn get_cvredun(
+    config: &CVRedundantConfig,
+) -> redundant::Connection<RequestMessage<VecU8>> {
     println!("Creating new redundant::Connection");
     let (redun, transport) = redundant::Connection::new();
     tokio::spawn(async move {
@@ -545,7 +585,9 @@ async fn get_cvredun(config: &CVRedundantConfig) -> redundant::Connection<Reques
 }
 
 /// Get a load balanced transport based on its config
-async fn get_lb(config: &LoadBalancerConfig) -> load_balancer::Connection<RequestMessage<VecU8>> {
+async fn get_lb(
+    config: &LoadBalancerConfig,
+) -> load_balancer::Connection<RequestMessage<VecU8>> {
     println!("Creating new load_balancer::Connection");
     let (lb, transport) = load_balancer::Connection::new();
     tokio::spawn(async move {
@@ -709,7 +751,8 @@ fn get_udptcp<CR: ComposeRequest + Clone + Debug + 'static>(
     let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
     let udp_connect = UdpConnect::new(sockaddr);
     let tcp_connect = TcpConnect::new(sockaddr);
-    let (conn, transport) = dgram_stream::Connection::new(udp_connect, tcp_connect);
+    let (conn, transport) =
+        dgram_stream::Connection::new(udp_connect, tcp_connect);
     tokio::spawn(async move {
         transport.run().await;
         println!("run terminated");
@@ -724,7 +767,8 @@ fn get_cvudptcp<CR: ComposeRequest + Clone + Debug + 'static>(
     let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
     let udp_connect = UdpConnect::new(sockaddr);
     let tcp_connect = TcpConnect::new(sockaddr);
-    let (conn, transport) = dgram_stream::Connection::new(udp_connect, tcp_connect);
+    let (conn, transport) =
+        dgram_stream::Connection::new(udp_connect, tcp_connect);
     tokio::spawn(async move {
         transport.run().await;
         println!("run terminated");
@@ -740,32 +784,33 @@ async fn get_qr_transport(
 ) -> Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> {
     let config = config.clone();
     println!("got config {:?}", config);
-    let a: Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> = match config {
-        FullTransportConfig::Redundant(redun_conf) => {
-            let conn = get_redun(&redun_conf).await;
-            box_cache_validator(cache_conf, validator_conf, conn)
-        }
-        FullTransportConfig::LoadBalancer(lb_conf) => {
-            let conn = get_lb(&lb_conf).await;
-            box_cache_validator(cache_conf, validator_conf, conn)
-        }
-        FullTransportConfig::Tcp(tcp_conf) => {
-            let conn = get_tcp(&tcp_conf);
-            box_cache_validator(cache_conf, validator_conf, conn)
-        }
-        FullTransportConfig::Tls(tls_conf) => {
-            let conn = get_tls(&tls_conf);
-            box_cache_validator(cache_conf, validator_conf, conn)
-        }
-        FullTransportConfig::Udp(udp_conf) => {
-            let conn = get_udp(&udp_conf);
-            box_cache_validator(cache_conf, validator_conf, conn)
-        }
-        FullTransportConfig::UdpTcp(udptcp_conf) => {
-            let conn = get_udptcp(&udptcp_conf);
-            box_cache_validator(cache_conf, validator_conf, conn)
-        }
-    };
+    let a: Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> =
+        match config {
+            FullTransportConfig::Redundant(redun_conf) => {
+                let conn = get_redun(&redun_conf).await;
+                box_cache_validator(cache_conf, validator_conf, conn)
+            }
+            FullTransportConfig::LoadBalancer(lb_conf) => {
+                let conn = get_lb(&lb_conf).await;
+                box_cache_validator(cache_conf, validator_conf, conn)
+            }
+            FullTransportConfig::Tcp(tcp_conf) => {
+                let conn = get_tcp(&tcp_conf);
+                box_cache_validator(cache_conf, validator_conf, conn)
+            }
+            FullTransportConfig::Tls(tls_conf) => {
+                let conn = get_tls(&tls_conf);
+                box_cache_validator(cache_conf, validator_conf, conn)
+            }
+            FullTransportConfig::Udp(udp_conf) => {
+                let conn = get_udp(&udp_conf);
+                box_cache_validator(cache_conf, validator_conf, conn)
+            }
+            FullTransportConfig::UdpTcp(udptcp_conf) => {
+                let conn = get_udptcp(&udptcp_conf);
+                box_cache_validator(cache_conf, validator_conf, conn)
+            }
+        };
     a
 }
 
@@ -775,12 +820,15 @@ fn get_simple_transport(
 ) -> Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> {
     let config = config.clone();
     println!("got config {:?}", config);
-    let a: Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> = match config {
-        TransportConfig::Tcp(tcp_conf) => Box::new(get_tcp(&tcp_conf)),
-        TransportConfig::Tls(tls_conf) => Box::new(get_tls(&tls_conf)),
-        TransportConfig::Udp(udp_conf) => Box::new(get_udp(&udp_conf)),
-        TransportConfig::UdpTcp(udptcp_conf) => Box::new(get_udptcp(&udptcp_conf)),
-    };
+    let a: Box<dyn SendRequest<RequestMessage<VecU8>> + Send + Sync> =
+        match config {
+            TransportConfig::Tcp(tcp_conf) => Box::new(get_tcp(&tcp_conf)),
+            TransportConfig::Tls(tls_conf) => Box::new(get_tls(&tls_conf)),
+            TransportConfig::Udp(udp_conf) => Box::new(get_udp(&udp_conf)),
+            TransportConfig::UdpTcp(udptcp_conf) => {
+                Box::new(get_udptcp(&udptcp_conf))
+            }
+        };
     a
 }
 
@@ -805,8 +853,13 @@ fn box_cache_validator(
     match validator_conf {
         Some(validator_conf) => {
             if validator_conf.enabled {
-                let anchor_file = File::open("root.key").unwrap();
-                let ta = TrustAnchors::from_reader(anchor_file).unwrap();
+                let ta = if let Some(file) = &validator_conf.trust_anchor {
+                    let anchor_file = File::open(file).unwrap();
+                    TrustAnchors::from_reader(anchor_file).unwrap()
+                } else {
+                    TrustAnchors::from_u8(IANA_TRUST_ANCHOR.as_bytes())
+                        .unwrap()
+                };
                 let vc = Arc::new(ValidationContext::new(ta, conn.clone()));
                 let conn = validator::Connection::new(conn, vc);
                 box_cache(cache_conf, conn)
@@ -843,7 +896,10 @@ pub struct RustlsTcpListener {
 }
 
 impl RustlsTcpListener {
-    pub fn new(listener: TcpListener, acceptor: tokio_rustls::TlsAcceptor) -> Self {
+    pub fn new(
+        listener: TcpListener,
+        acceptor: tokio_rustls::TlsAcceptor,
+    ) -> Self {
         Self { listener, acceptor }
     }
 }
@@ -854,9 +910,13 @@ impl AsyncAccept for RustlsTcpListener {
     type Future = tokio_rustls::Accept<TcpStream>;
 
     #[allow(clippy::type_complexity)]
-    fn poll_accept(&self, cx: &mut Context) -> Poll<Result<(Self::Future, SocketAddr), io::Error>> {
-        TcpListener::poll_accept(&self.listener, cx)
-            .map(|res| res.map(|(stream, addr)| (self.acceptor.accept(stream), addr)))
+    fn poll_accept(
+        &self,
+        cx: &mut Context,
+    ) -> Poll<Result<(Self::Future, SocketAddr), io::Error>> {
+        TcpListener::poll_accept(&self.listener, cx).map(|res| {
+            res.map(|(stream, addr)| (self.acceptor.accept(stream), addr))
+        })
     }
 }
 
@@ -869,8 +929,13 @@ async fn start_cache_validator_service(
     match validator_conf {
         Some(validator_conf) => {
             if validator_conf.enabled {
-                let anchor_file = File::open("root.key").unwrap();
-                let ta = TrustAnchors::from_reader(anchor_file).unwrap();
+                let ta = if let Some(file) = &validator_conf.trust_anchor {
+                    let anchor_file = File::open(file).unwrap();
+                    TrustAnchors::from_reader(anchor_file).unwrap()
+                } else {
+                    TrustAnchors::from_u8(IANA_TRUST_ANCHOR.as_bytes())
+                        .unwrap()
+                };
                 let vc = Arc::new(ValidationContext::new(ta, conn.clone()));
                 let conn = validator::Connection::new(conn, vc);
                 start_cache_service(cache_conf, conn, server_config).await
@@ -916,7 +981,10 @@ where
     start_service(svc, server_config).await
 }
 
-async fn start_service<SVC>(svc: SVC, config: &ServerConfig) -> Vec<JoinHandle<()>>
+async fn start_service<SVC>(
+    svc: SVC,
+    config: &ServerConfig,
+) -> Vec<JoinHandle<()>>
 where
     SVC: Service + Clone + Send + Sync + 'static,
     SVC::Future: Send,
@@ -927,15 +995,36 @@ where
 
     for l in &config.listen {
         match l {
-            ListenConfig::UdpTcp(sl_config) => {
-                handles.append(&mut start_service_udp_tcp(sl_config, true, true, svc.clone()).await)
-            }
-            ListenConfig::Udp(sl_config) => handles
-                .append(&mut start_service_udp_tcp(sl_config, true, false, svc.clone()).await),
-            ListenConfig::Tcp(sl_config) => handles
-                .append(&mut start_service_udp_tcp(sl_config, false, true, svc.clone()).await),
+            ListenConfig::UdpTcp(sl_config) => handles.append(
+                &mut start_service_udp_tcp(
+                    sl_config,
+                    true,
+                    true,
+                    svc.clone(),
+                )
+                .await,
+            ),
+            ListenConfig::Udp(sl_config) => handles.append(
+                &mut start_service_udp_tcp(
+                    sl_config,
+                    true,
+                    false,
+                    svc.clone(),
+                )
+                .await,
+            ),
+            ListenConfig::Tcp(sl_config) => handles.append(
+                &mut start_service_udp_tcp(
+                    sl_config,
+                    false,
+                    true,
+                    svc.clone(),
+                )
+                .await,
+            ),
             ListenConfig::Tls(sl_config) => {
-                let locport = sl_config.port.unwrap_or_else(|| "53".parse().unwrap());
+                let locport =
+                    sl_config.port.unwrap_or_else(|| "53".parse().unwrap());
                 let sockaddr = SocketAddr::new(
                     match &sl_config.addr {
                         Some(addr) => addr.parse(),
@@ -961,11 +1050,15 @@ where
 
                 let file = match File::open(&sl_config.key) {
                     Ok(file) => file,
-                    Err(e) => panic!("Unable to open key file {}: {e}", sl_config.key),
+                    Err(e) => panic!(
+                        "Unable to open key file {}: {e}",
+                        sl_config.key
+                    ),
                 };
-                let key = rustls_pemfile::private_key(&mut BufReader::new(file))
-                    .unwrap()
-                    .unwrap();
+                let key =
+                    rustls_pemfile::private_key(&mut BufReader::new(file))
+                        .unwrap()
+                        .unwrap();
 
                 let config = rustls::ServerConfig::builder()
                     .with_no_client_auth()
@@ -979,7 +1072,12 @@ where
                 let conn_config = server::ConnectionConfig::new();
                 let mut config = server::stream::Config::new();
                 config.set_connection_config(conn_config);
-                let srv = StreamServer::with_config(listener, buf_source, svc.clone(), config);
+                let srv = StreamServer::with_config(
+                    listener,
+                    buf_source,
+                    svc.clone(),
+                    config,
+                );
                 let srv = Arc::new(srv);
                 handles.push(tokio::spawn(async move { srv.run().await }));
             }
@@ -1018,7 +1116,12 @@ where
         let socket = UdpSocket::bind(sockaddr).await.unwrap();
 
         let config = server::dgram::Config::new();
-        let srv = DgramServer::with_config(socket, buf_source.clone(), svc.clone(), config);
+        let srv = DgramServer::with_config(
+            socket,
+            buf_source.clone(),
+            svc.clone(),
+            config,
+        );
         let srv = Arc::new(srv);
         handles.push(tokio::spawn(async move { srv.run().await }));
     }
@@ -1029,7 +1132,8 @@ where
         let conn_config = server::ConnectionConfig::new();
         let mut config = server::stream::Config::new();
         config.set_connection_config(conn_config);
-        let srv = StreamServer::with_config(listener, buf_source, svc, config);
+        let srv =
+            StreamServer::with_config(listener, buf_source, svc, config);
         let srv = Arc::new(srv);
         handles.push(tokio::spawn(async move { srv.run().await }));
     }
@@ -1054,7 +1158,11 @@ where
 
 /// Get a socket address for an IP address, and optional port and a
 /// default port.
-fn get_sockaddr(addr: &str, port: Option<&str>, default_port: u16) -> SocketAddr {
+fn get_sockaddr(
+    addr: &str,
+    port: Option<&str>,
+    default_port: u16,
+) -> SocketAddr {
     let port = match port {
         Some(str) => str.parse().unwrap(),
         None => default_port,
