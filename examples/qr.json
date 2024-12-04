@@ -1,0 +1,172 @@
+{
+"server":
+    {
+	"listen":
+	[
+	    {
+		"type": "UDP+TCP",
+		"port": 8053,
+		"addr": "::1"
+	    },
+	    {
+		"type": "UDP-only",
+		"port": 8054,
+		"addr": "::1"
+	    },
+	    {
+		"type": "TCP",
+		"port": 8055,
+		"addr": "::1"
+	    },
+	    {
+		"type": "TLS",
+		"port": 8056,
+		"addr": "::1",
+		"certificate": "/home/philip/src/domain/examples/sample.pem",
+		"key": "/home/philip/src/domain/examples/sample.rsa"
+	    }
+	]
+    },
+"upstream":
+    {
+    "type": "qname-router",
+    "domains":
+	[
+	    {
+	    "name": "nl",
+	    "cache":
+	    {
+		"enabled": true
+	    },
+	    "validator":
+	    {
+		"enabled": true
+	    },
+	    "upstream":
+		{
+		"type": "redundant",
+		"upstreams":
+		    [
+			{
+			"upstream": 
+			    {
+			    "type": "TLS",
+			    "servername": "one.one.one.one",
+			    "addr": "1.1.1.1"
+			    }
+			},
+			{
+			"upstream":
+			    {
+			    "type": "TLS",
+			    "servername": "one.one.one.one",
+			    "addr": "2606:4700:4700::1111"
+			    }
+			}
+		    ]
+		}
+	    },
+	    {
+	    "name": "com",
+	    "cache":
+	    {
+		"enabled": true
+	    },
+	    "validator":
+	    {
+		"enabled": true
+	    },
+	    "upstream":
+		{
+		"type": "lb",
+		"upstreams":
+		    [
+			{
+			"label": "Google IPv4",
+			"upstream":
+			    {
+			    "type": "TLS",
+			    "servername": "dns.google",
+			    "addr": "8.8.8.8"
+			    }
+			},
+			{
+			"label": "Google IPv6",
+			"upstream":
+			    {
+			    "type": "TLS",
+			    "servername": "dns.google",
+			    "addr": "2001:4860:4860::8888"
+			    }
+			}
+		    ]
+		}
+	    },
+	    {
+	    "name": ".",
+	    "cache":
+	    {
+		"enabled": true
+	    },
+	    "validator":
+	    {
+		"enabled": true
+	    },
+	    "upstream":
+		{
+		    "type": "TLS",
+		    "servername": "dns9.quad9.net",
+		    "addr": "9.9.9.9"
+		}
+	    },
+	    {
+	    "name": "org",
+	    "cache":
+	    {
+		"enabled": true
+	    },
+	    "validator":
+	    {
+		"enabled": true
+	    },
+	    "upstream":
+		{
+		    "type": "UDP",
+		    "addr": "2620:fe::9"
+		}
+	    },
+	    {
+	    "name": "de",
+	    "cache":
+	    {
+		"enabled": true
+	    },
+	    "validator":
+	    {
+		"enabled": true
+	    },
+	    "upstream":
+		{
+		    "type": "UDP-only",
+		    "addr": "2620:fe::9"
+		}
+	    },
+	    {
+	    "name": "be",
+	    "cache":
+	    {
+		"enabled": true
+	    },
+	    "validator":
+	    {
+		"enabled": true
+	    },
+	    "upstream":
+		{
+		    "type": "TCP",
+		    "addr": "2620:fe::9"
+		}
+	    }
+	]
+    }
+}
