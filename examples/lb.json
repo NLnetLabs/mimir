@@ -22,8 +22,8 @@
 		"type": "TLS",
 		"port": 8056,
 		"addr": "::1",
-		"certificate": "/home/philip/src/domain/examples/sample.pem",
-		"key": "/home/philip/src/domain/examples/sample.rsa"
+		"certificate": "examples/sample.pem",
+		"key": "examples/sample.rsa"
 	    }
 	]
     },
