@@ -117,27 +117,27 @@ enum TopUpstreamConfig {
 
     /// Redudant upstreams
     #[serde(rename = "redundant")]
-    Redundant(CVRedundantConfig),
+    Redundant(CacheValidatorRedundantConfig),
 
     /// Load balancer
     #[serde(rename = "lb")]
-    LoadBalancer(CVLoadBalancerConfig),
+    LoadBalancer(CacheValidatorLoadBalancerConfig),
 
     /// TCP upstream
     #[serde(rename = "TCP")]
-    Tcp(CVTcpConfig),
+    Tcp(CacheValidatorTcpConfig),
 
     /// TLS upstream
     #[serde(rename = "TLS")]
-    Tls(CVTlsConfig),
+    Tls(CacheValidatorTlsConfig),
 
     /// UDP upstream that does not switch to TCP when the reply is truncated
     #[serde(rename = "UDP-only")]
-    Udp(CVUdpConfig),
+    Udp(CacheValidatorUdpConfig),
 
     /// UDP upstream that switchs to TCP when the reply is truncated
     #[serde(rename = "UDP")]
-    UdpTcp(CVUdpTcpConfig),
+    UdpTcp(CacheValidatorUdpTcpConfig),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -178,11 +178,11 @@ enum FullTransportConfig {
 enum QrTransportConfig {
     /// Redudant upstreams
     #[serde(rename = "redundant")]
-    Redundant(CVRedundantConfig),
+    Redundant(CacheValidatorRedundantConfig),
 
     /// Load balancer
     #[serde(rename = "lb")]
-    LoadBalancer(CVLoadBalancerConfig),
+    LoadBalancer(CacheValidatorLoadBalancerConfig),
 
     /// TCP upstream
     #[serde(rename = "TCP")]
@@ -264,7 +264,7 @@ struct RedundantConfig {
 
 /// Config for a redundant transport
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct CVRedundantConfig {
+struct CacheValidatorRedundantConfig {
     cache: Option<CacheConfig>,
     validator: Option<ValidatorConfig>,
     /// List of upstream configs.
@@ -286,7 +286,7 @@ struct LoadBalancerConfig {
 
 /// Config for a load balancer transport
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct CVLoadBalancerConfig {
+struct CacheValidatorLoadBalancerConfig {
     cache: Option<CacheConfig>,
     validator: Option<ValidatorConfig>,
     /// List of upstream configs.
@@ -316,7 +316,7 @@ struct TcpConfig {
 
 /// Config for a TCP transport
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct CVTcpConfig {
+struct CacheValidatorTcpConfig {
     cache: Option<CacheConfig>,
     validator: Option<ValidatorConfig>,
     /// Address of the remote resolver
@@ -341,7 +341,7 @@ struct TlsConfig {
 
 /// Config for a TLS transport
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct CVTlsConfig {
+struct CacheValidatorTlsConfig {
     cache: Option<CacheConfig>,
     validator: Option<ValidatorConfig>,
     /// Name of the remote resolver
@@ -366,7 +366,7 @@ struct UdpConfig {
 
 /// Config for a UDP-only transport
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct CVUdpConfig {
+struct CacheValidatorUdpConfig {
     cache: Option<CacheConfig>,
     validator: Option<ValidatorConfig>,
     /// Address of the remote resolver
@@ -388,7 +388,7 @@ struct UdpTcpConfig {
 
 /// Config for a UDP+TCP transport
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct CVUdpTcpConfig {
+struct CacheValidatorUdpTcpConfig {
     cache: Option<CacheConfig>,
     validator: Option<ValidatorConfig>,
     /// Address of the remote resolver
@@ -443,7 +443,7 @@ async fn main() {
             start_single_service(qr, &conf.server).await
         }
         TopUpstreamConfig::Redundant(redun_conf) => {
-            let redun = get_cvredun(redun_conf).await;
+            let redun = get_cv_redundant(redun_conf).await;
             start_cache_validator_service(
                 &redun_conf.cache,
                 &redun_conf.validator,
@@ -453,17 +453,17 @@ async fn main() {
             .await
         }
         TopUpstreamConfig::LoadBalancer(lb_conf) => {
-            let redun = get_cvlb(lb_conf).await;
+            let lb = get_cv_lb(lb_conf).await;
             start_cache_validator_service(
                 &lb_conf.cache,
                 &lb_conf.validator,
-                redun,
+                lb,
                 &conf.server,
             )
             .await
         }
         TopUpstreamConfig::Tcp(tcp_conf) => {
-            let tcp = get_cvtcp::<RequestMessage<VecU8>>(tcp_conf);
+            let tcp = get_cv_tcp::<RequestMessage<VecU8>>(tcp_conf);
             start_cache_validator_service(
                 &tcp_conf.cache,
                 &tcp_conf.validator,
@@ -473,7 +473,7 @@ async fn main() {
             .await
         }
         TopUpstreamConfig::Tls(tls_conf) => {
-            let tls = get_cvtls::<RequestMessage<VecU8>>(tls_conf);
+            let tls = get_cv_tls::<RequestMessage<VecU8>>(tls_conf);
             start_cache_validator_service(
                 &tls_conf.cache,
                 &tls_conf.validator,
@@ -483,7 +483,7 @@ async fn main() {
             .await
         }
         TopUpstreamConfig::Udp(udp_conf) => {
-            let udp = get_cvudp::<RequestMessage<VecU8>>(udp_conf);
+            let udp = get_cv_udp::<RequestMessage<VecU8>>(udp_conf);
             start_cache_validator_service(
                 &udp_conf.cache,
                 &udp_conf.validator,
@@ -493,7 +493,7 @@ async fn main() {
             .await
         }
         TopUpstreamConfig::UdpTcp(udptcp_conf) => {
-            let udptcp = get_cvudptcp::<RequestMessage<VecU8>>(udptcp_conf);
+            let udptcp = get_cv_udptcp::<RequestMessage<VecU8>>(udptcp_conf);
             start_cache_validator_service(
                 &udptcp_conf.cache,
                 &udptcp_conf.validator,
@@ -550,9 +550,12 @@ async fn get_redun(
     redun
 }
 
-/// Get a redundant transport based on its config
-async fn get_cvredun(
-    config: &CVRedundantConfig,
+/// Get a redundant transport based on its config.
+///
+/// The config used is the CacheValidatorRedundantConfig but the cache and
+/// validator parts of the config are ignored.
+async fn get_cv_redundant(
+    config: &CacheValidatorRedundantConfig,
 ) -> redundant::Connection<RequestMessage<VecU8>> {
     println!("Creating new redundant::Connection");
     let (redun, transport) = redundant::Connection::new();
@@ -594,8 +597,11 @@ async fn get_lb(
 }
 
 /// Get a load balanced transport based on its config
-async fn get_cvlb(
-    config: &CVLoadBalancerConfig,
+///
+/// The config used is the CacheValidatorLoadBalancerConfig but the cache and
+/// validator parts of the config are ignored.
+async fn get_cv_lb(
+    config: &CacheValidatorLoadBalancerConfig,
 ) -> load_balancer::Connection<RequestMessage<VecU8>> {
     println!("Creating new load_balancer::Connection");
     let (lb, transport) = load_balancer::Connection::new();
@@ -635,8 +641,11 @@ fn get_tcp<CR: ComposeRequest + Clone + 'static>(
 }
 
 /// Get a TCP transport based on its config
-fn get_cvtcp<CR: ComposeRequest + Clone + 'static>(
-    config: &CVTcpConfig,
+///
+/// The config used is the CacheValidatorTcpConfig, but the cache and
+/// validator parts of the config are ignored.
+fn get_cv_tcp<CR: ComposeRequest + Clone + 'static>(
+    config: &CacheValidatorTcpConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
     let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
     let tcp_connect = TcpConnect::new(sockaddr);
@@ -680,8 +689,11 @@ fn get_tls<CR: ComposeRequest + Clone + 'static>(
 }
 
 /// Get a TLS transport based on its config
-fn get_cvtls<CR: ComposeRequest + Clone + 'static>(
-    config: &CVTlsConfig,
+///
+/// The config used is the CacheValidatorTlsConfig, but the cache and
+/// validator parts of the config are ignored.
+fn get_cv_tls<CR: ComposeRequest + Clone + 'static>(
+    config: &CacheValidatorTlsConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
     let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 853);
 
@@ -719,8 +731,11 @@ fn get_udp<CR: ComposeRequest + Clone + 'static>(
 }
 
 /// Get a UDP-only transport based on its config
-fn get_cvudp<CR: ComposeRequest + Clone + 'static>(
-    config: &CVUdpConfig,
+///
+/// The config used is the CacheValidatorUdpConfig, but the cache and
+/// validator parts of the config are ignored.
+fn get_cv_udp<CR: ComposeRequest + Clone + 'static>(
+    config: &CacheValidatorUdpConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
     let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
 
@@ -745,8 +760,11 @@ fn get_udptcp<CR: ComposeRequest + Clone + Debug + 'static>(
 }
 
 /// Get a UDP+TCP transport based on its config
-fn get_cvudptcp<CR: ComposeRequest + Clone + Debug + 'static>(
-    config: &CVUdpTcpConfig,
+///
+/// The config used is the CacheValidatorUdpTcpConfig, but the cache and
+/// validator parts of the config are ignored.
+fn get_cv_udptcp<CR: ComposeRequest + Clone + Debug + 'static>(
+    config: &CacheValidatorUdpTcpConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
     let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
     let udp_connect = UdpConnect::new(sockaddr);
