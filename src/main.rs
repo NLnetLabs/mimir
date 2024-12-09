@@ -298,6 +298,7 @@ struct CacheValidatorLoadBalancerConfig {
 struct LBUpstreamConfig {
     label: String,
     /// Maximum allowed burst for upstream.
+    #[serde(rename = "max-burst")]
     max_burst: Option<u64>,
     #[serde(rename = "burst-interval")]
     burst_interval: Option<f64>,
