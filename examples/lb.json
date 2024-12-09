@@ -43,7 +43,7 @@
 	[
 	    {
 		"label": "Cloudflare IPv4",
-		"qps": 1,
+		"max-burst": 10,
 		"burst-interval": 10,
 		"upstream":
 		    {
@@ -54,7 +54,7 @@
 	    },
 	    {
 		"label": "Cloudflare IPv6",
-		"qps": 10,
+		"max-burst": 100,
 		"burst-interval": 10,
 		"upstream":
 		    {
@@ -65,7 +65,7 @@
 	    },
 	    {
 		"label": "Google IPv4",
-		"qps": 1,
+		"max-burst": 10,
 		"burst-interval": 10,
 		"upstream":
 		    {
@@ -76,7 +76,7 @@
 	    },
 	    {
 		"label": "Google IPv6",
-		"qps": 10,
+		"max-burst": 100,
 		"burst-interval": 10,
 		"upstream":
 		    {
@@ -87,7 +87,7 @@
 	    },
 	    {
 		"label": "Quad9 IPv4",
-		"qps": 1,
+		"max-burst": 1,
 		"upstream":
 		    {
 			"type": "TLS",
