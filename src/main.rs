@@ -24,7 +24,7 @@ use domain::net::server::middleware::cookies::CookiesMiddlewareSvc;
 use domain::net::server::middleware::edns::EdnsMiddlewareSvc;
 use domain::net::server::middleware::mandatory::MandatoryMiddlewareSvc;
 use domain::net::server::qname_router::QnameRouter;
-use domain::net::server::service::{CallResult, Service, ServiceError};
+use domain::net::server::service::Service;
 use domain::net::server::single_service::ComposeReply;
 use domain::net::server::single_service::ReplyMessage;
 use domain::net::server::single_service::SingleService;
@@ -36,12 +36,10 @@ use serde::{Deserialize, Serialize};
 use serde_aux::field_attributes::bool_true;
 use std::fmt::Debug;
 use std::fs::File;
-use std::future::Future;
 use std::io;
 use std::io::BufReader;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
-use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -412,20 +410,6 @@ impl BufSource for VecBufSource {
 
     fn create_sized(&self, size: usize) -> Self::Output {
         vec![0; size]
-    }
-}
-
-/// A single optional call result based on a Vector.
-struct VecSingle(Option<CallResult<Vec<u8>>>);
-
-impl Future for VecSingle {
-    type Output = Result<CallResult<Vec<u8>>, ServiceError>;
-
-    fn poll(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Self::Output> {
-        Poll::Ready(Ok(self.0.take().unwrap()))
     }
 }
 
