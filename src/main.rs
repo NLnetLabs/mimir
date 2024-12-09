@@ -536,18 +536,7 @@ where
 async fn get_redun(
     config: &RedundantConfig,
 ) -> redundant::Connection<RequestMessage<VecU8>> {
-    println!("Creating new redundant::Connection");
-    let (redun, transport) = redundant::Connection::new();
-    tokio::spawn(async move {
-        transport.run().await;
-    });
-    println!("Adding to redundant::Connection");
-    for e in &config.upstreams {
-        println!("Add to redundant::Connection");
-        redun.add(get_simple_transport(&e.upstream)).await.unwrap();
-        println!("After Add to redundant::Connection");
-    }
-    redun
+    get_redun_common(&config.upstreams).await
 }
 
 /// Get a redundant transport based on its config.
@@ -557,16 +546,18 @@ async fn get_redun(
 async fn get_cv_redundant(
     config: &CacheValidatorRedundantConfig,
 ) -> redundant::Connection<RequestMessage<VecU8>> {
-    println!("Creating new redundant::Connection");
+    get_redun_common(&config.upstreams).await
+}
+
+async fn get_redun_common(
+    upstreams: &[RedundantUpstreamConfig],
+) -> redundant::Connection<RequestMessage<VecU8>> {
     let (redun, transport) = redundant::Connection::new();
     tokio::spawn(async move {
         transport.run().await;
     });
-    println!("Adding to redundant::Connection");
-    for e in &config.upstreams {
-        println!("Add to redundant::Connection");
+    for e in upstreams {
         redun.add(get_simple_transport(&e.upstream)).await.unwrap();
-        println!("After Add to redundant::Connection");
     }
     redun
 }
@@ -575,25 +566,7 @@ async fn get_cv_redundant(
 async fn get_lb(
     config: &LoadBalancerConfig,
 ) -> load_balancer::Connection<RequestMessage<VecU8>> {
-    println!("Creating new load_balancer::Connection");
-    let (lb, transport) = load_balancer::Connection::new();
-    tokio::spawn(async move {
-        transport.run().await;
-    });
-    println!("Adding to load_balancer::Connection");
-    for e in &config.upstreams {
-        println!("Add to load_balancer::Connection");
-        let mut conf = load_balancer::ConnConfig::new();
-        conf.set_max_burst(e.max_burst);
-        if let Some(f) = e.burst_interval {
-            conf.set_burst_interval(Duration::from_secs_f64(f));
-        }
-        lb.add(&e.label, &conf, get_simple_transport(&e.upstream))
-            .await
-            .unwrap();
-        println!("After Add to load_balancer::Connection");
-    }
-    lb
+    get_lb_common(&config.upstreams).await
 }
 
 /// Get a load balanced transport based on its config
@@ -603,14 +576,17 @@ async fn get_lb(
 async fn get_cv_lb(
     config: &CacheValidatorLoadBalancerConfig,
 ) -> load_balancer::Connection<RequestMessage<VecU8>> {
-    println!("Creating new load_balancer::Connection");
+    get_lb_common(&config.upstreams).await
+}
+
+async fn get_lb_common(
+    upstreams: &[LBUpstreamConfig],
+) -> load_balancer::Connection<RequestMessage<VecU8>> {
     let (lb, transport) = load_balancer::Connection::new();
     tokio::spawn(async move {
         transport.run().await;
     });
-    println!("Adding to load_balancer::Connection");
-    for e in &config.upstreams {
-        println!("Add to load_balancer::Connection");
+    for e in upstreams {
         let mut conf = load_balancer::ConnConfig::new();
         conf.set_max_burst(e.max_burst);
         if let Some(f) = e.burst_interval {
@@ -619,7 +595,6 @@ async fn get_cv_lb(
         lb.add(&e.label, &conf, get_simple_transport(&e.upstream))
             .await
             .unwrap();
-        println!("After Add to load_balancer::Connection");
     }
     lb
 }
@@ -628,16 +603,7 @@ async fn get_cv_lb(
 fn get_tcp<CR: ComposeRequest + Clone + 'static>(
     config: &TcpConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
-    let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
-    let tcp_connect = TcpConnect::new(sockaddr);
-
-    let (conn, transport) = multi_stream::Connection::new(tcp_connect);
-    tokio::spawn(async move {
-        transport.run().await;
-        println!("run terminated");
-    });
-
-    conn
+    get_tcp_common(&config.addr, &config.port)
 }
 
 /// Get a TCP transport based on its config
@@ -647,7 +613,14 @@ fn get_tcp<CR: ComposeRequest + Clone + 'static>(
 fn get_cv_tcp<CR: ComposeRequest + Clone + 'static>(
     config: &CacheValidatorTcpConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
-    let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
+    get_tcp_common(&config.addr, &config.port)
+}
+
+fn get_tcp_common<CR: ComposeRequest + Clone + 'static>(
+    addr: &str,
+    port: &Option<String>,
+) -> impl SendRequest<CR> + Clone + Send + Sync {
+    let sockaddr = get_sockaddr(addr, port.as_deref(), 53);
     let tcp_connect = TcpConnect::new(sockaddr);
 
     let (conn, transport) = multi_stream::Connection::new(tcp_connect);
@@ -663,29 +636,7 @@ fn get_cv_tcp<CR: ComposeRequest + Clone + 'static>(
 fn get_tls<CR: ComposeRequest + Clone + 'static>(
     config: &TlsConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
-    let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 853);
-
-    // Some TLS boiler plate for the root certificates.
-    let root_store = RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.into(),
-    };
-
-    let client_config = ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
-    let tls_connect = TlsConnect::new(
-        client_config,
-        String::from(config.servername.as_str()).try_into().unwrap(),
-        sockaddr,
-    );
-    let (conn, transport) = multi_stream::Connection::new(tls_connect);
-    tokio::spawn(async move {
-        transport.run().await;
-        println!("run terminated");
-    });
-
-    conn
+    get_tls_common(&config.addr, &config.port, &config.servername)
 }
 
 /// Get a TLS transport based on its config
@@ -695,7 +646,15 @@ fn get_tls<CR: ComposeRequest + Clone + 'static>(
 fn get_cv_tls<CR: ComposeRequest + Clone + 'static>(
     config: &CacheValidatorTlsConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
-    let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 853);
+    get_tls_common(&config.addr, &config.port, &config.servername)
+}
+
+fn get_tls_common<CR: ComposeRequest + Clone + 'static>(
+    addr: &str,
+    port: &Option<String>,
+    servername: &str,
+) -> impl SendRequest<CR> + Clone + Send + Sync {
+    let sockaddr = get_sockaddr(addr, port.as_deref(), 853);
 
     // Some TLS boiler plate for the root certificates.
     let root_store = RootCertStore {
@@ -708,7 +667,7 @@ fn get_cv_tls<CR: ComposeRequest + Clone + 'static>(
 
     let tls_connect = TlsConnect::new(
         client_config,
-        String::from(config.servername.as_str()).try_into().unwrap(),
+        String::from(servername).try_into().unwrap(),
         sockaddr,
     );
     let (conn, transport) = multi_stream::Connection::new(tls_connect);
@@ -724,10 +683,7 @@ fn get_cv_tls<CR: ComposeRequest + Clone + 'static>(
 fn get_udp<CR: ComposeRequest + Clone + 'static>(
     config: &UdpConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
-    let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
-
-    let udp_connect = UdpConnect::new(sockaddr);
-    dgram::Connection::new(udp_connect)
+    get_udp_common(&config.addr, &config.port)
 }
 
 /// Get a UDP-only transport based on its config
@@ -737,7 +693,14 @@ fn get_udp<CR: ComposeRequest + Clone + 'static>(
 fn get_cv_udp<CR: ComposeRequest + Clone + 'static>(
     config: &CacheValidatorUdpConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
-    let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
+    get_udp_common(&config.addr, &config.port)
+}
+
+fn get_udp_common<CR: ComposeRequest + Clone + 'static>(
+    addr: &str,
+    port: &Option<String>,
+) -> impl SendRequest<CR> + Clone + Send + Sync {
+    let sockaddr = get_sockaddr(addr, port.as_deref(), 53);
 
     let udp_connect = UdpConnect::new(sockaddr);
     dgram::Connection::new(udp_connect)
@@ -747,16 +710,7 @@ fn get_cv_udp<CR: ComposeRequest + Clone + 'static>(
 fn get_udptcp<CR: ComposeRequest + Clone + Debug + 'static>(
     config: &UdpTcpConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
-    let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
-    let udp_connect = UdpConnect::new(sockaddr);
-    let tcp_connect = TcpConnect::new(sockaddr);
-    let (conn, transport) =
-        dgram_stream::Connection::new(udp_connect, tcp_connect);
-    tokio::spawn(async move {
-        transport.run().await;
-        println!("run terminated");
-    });
-    conn
+    get_udptcp_common(&config.addr, &config.port)
 }
 
 /// Get a UDP+TCP transport based on its config
@@ -766,7 +720,14 @@ fn get_udptcp<CR: ComposeRequest + Clone + Debug + 'static>(
 fn get_cv_udptcp<CR: ComposeRequest + Clone + Debug + 'static>(
     config: &CacheValidatorUdpTcpConfig,
 ) -> impl SendRequest<CR> + Clone + Send + Sync {
-    let sockaddr = get_sockaddr(&config.addr, config.port.as_deref(), 53);
+    get_udptcp_common(&config.addr, &config.port)
+}
+
+fn get_udptcp_common<CR: ComposeRequest + Clone + Debug + 'static>(
+    addr: &str,
+    port: &Option<String>,
+) -> impl SendRequest<CR> + Clone + Send + Sync {
+    let sockaddr = get_sockaddr(addr, port.as_deref(), 53);
     let udp_connect = UdpConnect::new(sockaddr);
     let tcp_connect = TcpConnect::new(sockaddr);
     let (conn, transport) =
