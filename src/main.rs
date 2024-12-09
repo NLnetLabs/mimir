@@ -986,8 +986,7 @@ where
                 .await,
             ),
             ListenConfig::Tls(sl_config) => {
-                let locport =
-                    sl_config.port.unwrap_or_else(|| "53".parse().unwrap());
+                let locport = sl_config.port.unwrap_or(53);
                 let sockaddr = SocketAddr::new(
                     match &sl_config.addr {
                         Some(addr) => addr.parse(),
@@ -1062,7 +1061,7 @@ where
     SVC::Stream: Send,
     SVC::Target: Composer + Default + Send + Sync,
 {
-    let locport = sl_config.port.unwrap_or_else(|| "53".parse().unwrap());
+    let locport = sl_config.port.unwrap_or(53);
     let sockaddr = SocketAddr::new(
         match &sl_config.addr {
             Some(addr) => addr.parse(),
