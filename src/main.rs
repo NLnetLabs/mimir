@@ -874,7 +874,7 @@ fn box_cache(
 
 //--- RustlsTcpListener
 
-pub struct RustlsTcpListener {
+struct RustlsTcpListener {
     listener: TcpListener,
     acceptor: tokio_rustls::TlsAcceptor,
 }
