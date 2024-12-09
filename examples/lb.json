@@ -37,7 +37,7 @@
     "validator":
 	{
 	    "enabled": true,
-	    "Xtrust-anchor": "root.key"
+	    "trust-anchor": "examples/root.key"
 	},
     "upstreams":
 	[
