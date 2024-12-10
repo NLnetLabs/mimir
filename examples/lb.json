@@ -1,0 +1,109 @@
+{
+"server":
+    {
+	"listen":
+	[
+	    {
+		"type": "UDP+TCP",
+		"port": 8053,
+		"addr": "::1"
+	    },
+	    {
+		"type": "UDP-only",
+		"port": 8054,
+		"addr": "::1"
+	    },
+	    {
+		"type": "TCP",
+		"port": 8055,
+		"addr": "::1"
+	    },
+	    {
+		"type": "TLS",
+		"port": 8056,
+		"addr": "::1",
+		"certificate": "examples/sample.pem",
+		"key": "examples/sample.rsa"
+	    }
+	]
+    },
+"upstream":
+    {
+    "type": "lb",
+    "cache":
+	{
+	    "enabled": true
+	},
+    "validator":
+	{
+	    "enabled": true,
+	    "trust-anchor": "examples/root.key"
+	},
+    "upstreams":
+	[
+	    {
+		"label": "Cloudflare IPv4",
+		"max-burst": 10,
+		"burst-interval": 10,
+		"upstream":
+		    {
+			"type": "TLS",
+			"servername": "one.one.one.one",
+			"addr": "1.1.1.1"
+		    }
+	    },
+	    {
+		"label": "Cloudflare IPv6",
+		"max-burst": 100,
+		"burst-interval": 10,
+		"upstream":
+		    {
+			"type": "TLS",
+			"servername": "one.one.one.one",
+			"addr": "2606:4700:4700::1111"
+		    }
+	    },
+	    {
+		"label": "Google IPv4",
+		"max-burst": 10,
+		"burst-interval": 10,
+		"upstream":
+		    {
+			"type": "TLS",
+			"servername": "dns.google",
+			"addr": "8.8.8.8"
+		    }
+	    },
+	    {
+		"label": "Google IPv6",
+		"max-burst": 100,
+		"burst-interval": 10,
+		"upstream":
+		    {
+			"type": "TLS",
+			"servername": "dns.google",
+			"addr": "2001:4860:4860::8888"
+		    }
+	    },
+	    {
+		"label": "Quad9 IPv4",
+		"max-burst": 1,
+		"upstream":
+		    {
+			"type": "TLS",
+			"servername": "dns9.quad9.net",
+			"addr": "9.9.9.9"
+		    }
+	    },
+	    {
+		"label": "Quad9 IPv6",
+		"upstream":
+		    {
+			"type": "TLS",
+			"servername": "dns9.quad9.net",
+			"addr": "2620:fe::9"
+		    }
+	    }
+	]
+    }
+}
