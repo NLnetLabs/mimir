@@ -1,4 +1,4 @@
-# dnsp - A DNS Proxy
+# mimir - A DNS Proxy
 
 This proxy is designed with three use cases in mind:
 
